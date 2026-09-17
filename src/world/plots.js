@@ -64,8 +64,9 @@ const MAX_CELLS = 9
 const SHIP_CELL = { q: -2, r: 1 }
 /** The lattice cell the MCP switchboard owns. Nothing else may be placed there. */
 const SWITCHBOARD_CELL = { q: -2, r: -1 }
-/** The lattice cell the usage canister owns. Nothing else may be placed there. */
-const CANISTER_CELL = { q: 2, r: -1 }
+/** The lattice cell the usage canister owns — the same column as the ship and the
+ *  switchboard, directly between them. Nothing else may be placed there. */
+const CANISTER_CELL = { q: -2, r: 0 }
 /** Every cell held by fixed colony furniture rather than a project. */
 const RESERVED_CELLS = [SHIP_CELL, SWITCHBOARD_CELL, CANISTER_CELL]
 

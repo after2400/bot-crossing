@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js'
+import { createLabel } from './plots.js'
 
 /**
  * The usage canister — a tank of glowing goo standing for this month's estimated spend
@@ -41,6 +42,17 @@ const HOT = new THREE.Color(0xd6543f)
 export function burnRateColor(ratio) {
   const t = THREE.MathUtils.clamp((ratio - 0.75) / 0.65, 0, 1)
   return CALM.clone().lerp(HOT, t)
+}
+
+/**
+ * The flag's own colour — a traffic light rather than the goo's smooth gradient, because the
+ * flag's job is a single yes/no/careful glance rather than a magnitude. Green comfortably
+ * under pace, amber within shouting distance of it either way, red over.
+ */
+export function paceColor(ratio) {
+  if (ratio < 0.85) return 0x4caf6a
+  if (ratio <= 1.15) return 0xd9b23c
+  return 0xd6543f
 }
 
 export class UsageCanister {
@@ -129,6 +141,35 @@ export class UsageCanister {
 
     // Where a spend orb leaves from — the top of the tank.
     this.emitLocal = new THREE.Vector3(0, BASE_Y + TANK_HEIGHT + 0.2, 0)
+
+    this.flag = null
+    this._flagKey = null
+  }
+
+  /**
+   * The "% left" flag above the tank. Rebuilt only when the rounded percentage or the pace
+   * colour actually changes — `createLabel` bakes its text to a canvas once, the same
+   * technique a project's name plate uses, so it is not something to redo every frame.
+   */
+  _updateFlag(fraction, ratio) {
+    const pct = Math.max(0, Math.round((1 - fraction) * 100))
+    const color = paceColor(ratio)
+    const key = `${pct}:${color}`
+    if (this._flagKey === key) return
+    this._flagKey = key
+
+    if (this.flag) {
+      this.group.remove(this.flag)
+      this.flag.userData.dispose?.()
+    }
+    this.flag = createLabel(`${pct}% left`, color)
+    // `createLabel` bakes a plate at opacity 0, hidden until whoever placed it fades it in —
+    // a plot's own name plate does that on hover, but this flag has no such moment and is
+    // meant to just always be there.
+    this.flag.material.opacity = 1
+    this.flag.visible = true
+    this.flag.position.set(0, BASE_Y + TANK_HEIGHT + 0.75, 0)
+    this.group.add(this.flag)
   }
 
   /** World position an orb should leave from. */
@@ -142,10 +183,16 @@ export class UsageCanister {
     return this._color
   }
 
-  /** `fraction`: spend ÷ budget, 0..1+. `color`: the burn-rate tint (see `burnRateColor`). */
-  setUsage(fraction, color) {
+  /**
+   * `fraction`: spend ÷ budget, 0..1+. `color`: the goo's burn-rate tint (see
+   * `burnRateColor`). `ratio`: the same burn ratio, for the flag's own traffic-light colour
+   * (see `paceColor`) — passed separately because the two colour schemes read the number
+   * differently and neither should have to reverse-engineer the other's tint to get it back.
+   */
+  setUsage(fraction, color, ratio = 1) {
     this._targetFraction = THREE.MathUtils.clamp(fraction, 0, 1)
     this._targetColor.set(color)
+    this._updateFlag(this._targetFraction, ratio)
   }
 
   update(dt, elapsed, night) {
@@ -160,6 +207,9 @@ export class UsageCanister {
   }
 
   dispose() {
+    // The flag's texture is only released by its own `userData.dispose`, not by the generic
+    // mesh traversal below.
+    this.flag?.userData.dispose?.()
     this.group.traverse((o) => {
       if (o.isMesh) {
         o.geometry.dispose()

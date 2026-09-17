@@ -1274,8 +1274,8 @@ export class Colony {
   _applyUsage(spendThisMonth) {
     const budget = this.settings.get('monthlyBudget')
     const fraction = budget > 0 ? spendThisMonth / budget : 0
-    const color = burnRateColor(burnRatio(spendThisMonth, budget))
-    this.usageCanister.setUsage(fraction, color)
+    const ratio = burnRatio(spendThisMonth, budget)
+    this.usageCanister.setUsage(fraction, burnRateColor(ratio), ratio)
   }
 
   /**
