@@ -725,6 +725,11 @@ function applyThreads(list) {
   hud.setStats(stats)
   chimeForNewWaiting(list, archivedSet, hiddenSet)
 
+  // Every call the harness reported since the last poll fires one switchboard beam at the
+  // zone it happened in. The harness already trims this to what is new — nothing here has
+  // to remember what it showed last time.
+  for (const t of list) for (const call of t.mcpCalls || []) colony.pulseMcpCall(call.project || t.project)
+
   legendProjects = colony.plotOrder
     .map((plot) => ({
       name: plot.name,

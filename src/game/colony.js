@@ -14,6 +14,7 @@ import {
   Plot,
   allocateCells,
   shipPosition,
+  switchboardPosition,
   createLabel,
   hashString,
   worldToHex,
@@ -23,6 +24,7 @@ import {
 } from '../world/plots.js'
 import { createBuilding, buildingUniforms, Scaffolds } from '../world/buildings.js'
 import { Ship } from '../world/ship.js'
+import { MCPSwitchboard } from '../world/mcpSwitchboard.js'
 import { Astronauts } from '../agents/astronauts.js'
 import { Indicators, BADGE } from '../agents/indicators.js'
 import { MAX_AGENT_CAP } from '../core/settings.js'
@@ -50,6 +52,9 @@ import { liveThreadsForColony } from './hidden-projects.js'
  */
 
 const STALE_MS = 3 * 24 * 60 * 60 * 1000
+/** How long a plot's border flashes after an MCP call — matches the switchboard beam's own
+ *  fade, so the two ends of the connection read as one event rather than two. */
+const MCP_PULSE_LIFETIME = 2.6
 /** How wide an astronaut is, for the purpose of not fitting through gaps it should not. */
 const AGENT_RADIUS = 0.26
 /**
@@ -147,12 +152,16 @@ export class Colony {
     this.buildingSurfaces = new BuildingSurfaces(this.buildings, (x, z) => this.surfaceAt(x, z))
     this.threads = new Map()
     this.usedAccents = new Set()
+    /** Project id -> seconds left of border flash, decaying to 0. See `pulseMcpCall`. */
+    this.mcpPulses = new Map()
 
     this.worldGroup = new THREE.Group()
     this.worldGroup.name = 'world'
     scene.add(this.worldGroup)
 
     this.ship = new Ship(scene, shipPosition())
+    this.switchboard = new MCPSwitchboard(scene, switchboardPosition())
+    this.switchboard.group.visible = settings.get('mcpSwitchboard')
     this.astronauts = new Astronauts(scene, settings)
     this.astronauts.world = this._world()
     // Sized for the largest preset rather than the current one: unlike the astronaut meshes these
@@ -217,6 +226,8 @@ export class Colony {
     // at construction — a world with more relief would otherwise leave it hovering.
     const ship = shipPosition()
     this.ship.group.position.y = terrainHeight(ship.x, ship.z, this.planet)
+    const switchboard = switchboardPosition()
+    this.switchboard.group.position.y = terrainHeight(switchboard.x, switchboard.z, this.planet)
 
     this._dustTint.set(this.planet.ground.high)
 
@@ -287,6 +298,8 @@ export class Colony {
     }
     const ship = shipPosition()
     list.push({ x: ship.x, z: ship.z })
+    const switchboard = switchboardPosition()
+    list.push({ x: switchboard.x, z: switchboard.z })
     return list.slice(0, SKY_MAX_CELLS)
   }
 
@@ -384,6 +397,8 @@ export class Colony {
     }
     const ship = shipPosition()
     clear.push({ x: ship.x, z: ship.z, r: 7.5 })
+    const switchboard = switchboardPosition()
+    clear.push({ x: switchboard.x, z: switchboard.z, r: 6 })
     this.scatterGroup = createScatter(this.planet, this.settings.get('scatterDensity'), clear, 4242, (x, z) => this.onIsland(x, z))
     this.worldGroup.add(this.scatterGroup)
     this._scatterFootprint = this._plotFootprint()
@@ -452,6 +467,14 @@ export class Colony {
     if (changed.has('clouds')) this.sky.setPlanet(this.planet)
     if (changed.has('showLabels')) this._syncLabels()
     if (changed.has('timeOfDay')) this.sky.setTime(this.settings.get('timeOfDay'))
+    if (changed.has('mcpSwitchboard')) {
+      const on = this.settings.get('mcpSwitchboard')
+      this.switchboard.group.visible = on
+      if (!on) {
+        this.switchboard.clear()
+        this.mcpPulses.clear()
+      }
+    }
   }
 
   // ── roster ──────────────────────────────────────────────────────────────────────────
@@ -967,6 +990,7 @@ export class Colony {
     // One write turns every rotor in the colony.
     buildingUniforms.uTime.value = elapsed
     this.ship.update(dt, elapsed, night)
+    this.switchboard.update(dt, elapsed, night)
 
     this._growBuildings(dt)
     this.astronauts.update(dt, elapsed)
@@ -987,7 +1011,7 @@ export class Colony {
       ripple: (x, z, s) => this.ripple(x, z, s),
       sound: (name, x, y, z) => this.onSound?.(name, x, y, z),
     }))
-    this._updatePlots(night, elapsed)
+    this._updatePlots(night, elapsed, dt)
     this._updateScaffolds()
     this._updateLabels(dt)
     this.reflections.update(dt, focus || this.sky.focus, this.camera)
@@ -1136,9 +1160,19 @@ export class Colony {
     }
   }
 
-  _updatePlots(night, elapsed) {
+  _updatePlots(night, elapsed, dt) {
     const urgent = this.urgentPlots
-    for (const plot of this.plotOrder) plot.setNight(night, urgent?.has(plot.id) ?? false, elapsed)
+    for (const plot of this.plotOrder) {
+      const life = this.mcpPulses.get(plot.id)
+      let mcpPulse = 0
+      if (life !== undefined) {
+        const next = life - dt
+        if (next <= 0) this.mcpPulses.delete(plot.id)
+        else this.mcpPulses.set(plot.id, next)
+        mcpPulse = Math.max(0, next) / MCP_PULSE_LIFETIME
+      }
+      plot.setNight(night, urgent?.has(plot.id) ?? false, elapsed, mcpPulse)
+    }
   }
 
   /** Which buildings have scaffolding up right now, and where its poles stand. */
@@ -1186,6 +1220,22 @@ export class Colony {
     return this.astronauts.byId.get(id)
   }
 
+  /**
+   * Fire a switchboard beam at a project's zone — called once per new MCP call the poll saw.
+   * It runs from the top of the tower down to the middle of the tile, and the plot's own
+   * border glows for as long as the beam is up — see `Plot.setNight`'s `mcpPulse`, driven
+   * from `this.mcpPulses` in `_updatePlots`.
+   */
+  pulseMcpCall(projectId) {
+    if (!this.settings.get('mcpSwitchboard')) return
+    const plot = this.plots.get(projectId)
+    if (!plot) return
+    const landing = plot.middle.clone()
+    landing.y = DECK_TOP + 0.3
+    this.switchboard.fire(landing, plot.accent)
+    this.mcpPulses.set(plot.id, MCP_PULSE_LIFETIME)
+  }
+
   setUiVisible(visible) {
     this.uiVisible = visible
     this._syncLabels()
@@ -1205,6 +1255,7 @@ export class Colony {
     this.rock?.dispose()
     this.water?.dispose()
     this.ship.dispose()
+    this.switchboard.dispose()
     this.astronauts.dispose()
     this.indicators.dispose()
     this.particles.dispose()

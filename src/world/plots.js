@@ -62,6 +62,10 @@ const SLOTS_PER_CELL = 7
 const MAX_CELLS = 9
 /** The lattice cell the ship owns. Nothing else may be placed there. */
 const SHIP_CELL = { q: -2, r: 1 }
+/** The lattice cell the MCP switchboard owns. Nothing else may be placed there. */
+const SWITCHBOARD_CELL = { q: -2, r: -1 }
+/** Every cell held by fixed colony furniture rather than a project. */
+const RESERVED_CELLS = [SHIP_CELL, SWITCHBOARD_CELL]
 
 const HEX_DIRS = [
   [1, 0],
@@ -173,15 +177,16 @@ function hexDistance(a, b) {
  * gone those cells are now islands floating in the sea. That is what folding away dormant repos
  * does the first time it runs.
  *
- * The ship's cell counts as walkable here even though nobody may claim it: a colony that
- * happens to wrap around the ship is not two colonies.
+ * The ship's cell — and the switchboard's — count as walkable here even though nobody may
+ * claim them: a colony that happens to wrap around a piece of fixed furniture is not two
+ * colonies.
  */
 function isConnected(out) {
   const cells = new Map()
   for (const [, list] of out) for (const c of list) cells.set(key(c.q, c.r), c)
   if (cells.size < 2) return true
-  const ship = key(SHIP_CELL.q, SHIP_CELL.r)
-  const passable = new Set([...cells.keys(), ship])
+  const furniture = RESERVED_CELLS.map((c) => key(c.q, c.r))
+  const passable = new Set([...cells.keys(), ...furniture])
   const [start] = cells.keys()
   const seen = new Set([start])
   const queue = [cells.get(start)]
@@ -195,9 +200,9 @@ function isConnected(out) {
       queue.push(n)
     }
   }
-  // The ship is a stepping stone, not a member: it does not have to be reached for the colony
-  // to be whole, and it does not count toward what has to be.
-  seen.delete(ship)
+  // Fixed furniture is a stepping stone, not a member: it does not have to be reached for
+  // the colony to be whole, and it does not count toward what has to be.
+  for (const k of furniture) seen.delete(k)
   return seen.size === cells.size
 }
 
@@ -211,7 +216,7 @@ export function allocateCells(projects, previous = new Map()) {
 }
 
 function layOut(projects, previous) {
-  const reserved = key(SHIP_CELL.q, SHIP_CELL.r)
+  const reserved = new Set(RESERVED_CELLS.map((c) => key(c.q, c.r)))
   // Shrinking has hysteresis. A zone sitting exactly on a cell boundary would otherwise
   // hand a tile back the moment one thread is archived and claim it again when the next
   // one starts — and every hand-back rebuilds the plot and walks its whole crew. A tile is
@@ -240,7 +245,7 @@ function layOut(projects, previous) {
   for (let ring = 0; (pool.length < total + 30 || ring <= farthest) && ring < 12; ring++) {
     for (const cell of hexRing(ring)) {
       const k = key(cell.q, cell.r)
-      if (k === reserved) continue
+      if (reserved.has(k)) continue
       pool.push(cell)
       free.add(k)
     }
@@ -317,6 +322,11 @@ function growBlob(cells, want, free) {
 
 export const shipPosition = () => {
   const { x, z } = hexToWorld(SHIP_CELL.q, SHIP_CELL.r)
+  return new THREE.Vector3(x, 0, z)
+}
+
+export const switchboardPosition = () => {
+  const { x, z } = hexToWorld(SWITCHBOARD_CELL.q, SWITCHBOARD_CELL.r)
   return new THREE.Vector3(x, 0, z)
 }
 
@@ -568,6 +578,26 @@ export class Plot {
     this.border = new THREE.Mesh(geo, this.borderMaterial)
     this.border.receiveShadow = true
     this.group.add(this.border)
+
+    // A dedicated glow layer for `mcpPulse`, sharing the kerb's own geometry rather than
+    // outlining the tile separately — so it always traces the exact same edges. Kept apart
+    // from `borderMaterial` because tuning that material's `emissiveIntensity` alone got lost
+    // to bloom saturation at the brightness the kerb already sits at; an additive layer on
+    // top reads as a distinct flash however bright the kerb underneath already is.
+    this.glowMaterial = new THREE.MeshBasicMaterial({
+      color: this.accent,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      toneMapped: false,
+    })
+    this.borderGlow = new THREE.Mesh(geo, this.glowMaterial)
+    // Very slightly proud of the kerb it traces, in X/Z only — a halo has to sit outside the
+    // thing it outlines, not be exactly coincident with it, or two coplanar surfaces z-fight.
+    this.borderGlow.scale.set(1.08, 1, 1.08)
+    this.borderGlow.renderOrder = 5
+    this.group.add(this.borderGlow)
   }
 
   /** A lamp post on one corner of each cell — the plot's own night lighting. */
@@ -710,12 +740,17 @@ export class Plot {
     return out.set(this.center.x + s.x, DECK_TOP, this.center.z + s.z)
   }
 
-  /** Night lighting, plus a pulse on the border when this plot holds something urgent. */
-  setNight(night, urgent, elapsed) {
+  /**
+   * Night lighting, a slow pulse on the border when this plot holds something urgent, and the
+   * `borderGlow` halo — `mcpPulse`, 1 fading to 0 — for as long as a switchboard beam is
+   * headed here.
+   */
+  setNight(night, urgent, elapsed, mcpPulse = 0) {
     if (this.borderMaterial) {
       this.borderMaterial.emissiveIntensity =
         0.3 + night * 1.4 + (urgent ? 0.4 + Math.sin(elapsed * 3.4) * 0.32 : 0)
     }
+    if (this.glowMaterial) this.glowMaterial.opacity = mcpPulse
     this.lampMaterial.color.copy(this._lampBase).multiplyScalar(0.5 + night * 2.4)
   }
 

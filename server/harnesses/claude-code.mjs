@@ -17,7 +17,7 @@ import fsp from 'node:fs/promises'
 import { existsSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { exists, findExecutable, jsonLines, listDirs, listFiles, num, readHead, readTail } from '../lib/fsutil.mjs'
+import { exists, findExecutable, jsonLines, listDirs, listFiles, num, readHead, readRange, readTail } from '../lib/fsutil.mjs'
 
 const HOME = os.homedir()
 
@@ -226,6 +226,66 @@ async function awaitingReply(file) {
     return !calling && r.message?.stop_reason !== 'tool_use'
   }
   return false
+}
+
+/**
+ * The server name out of an MCP tool's own name, e.g. `mcp__ccd_session__mark_chapter` →
+ * `ccd_session` — this is Claude Code's naming convention for every MCP-provided tool, and
+ * the only signal available for telling one apart from a built-in like `Read` or `Bash`.
+ * A server or tool name may itself hold single underscores, so this splits on the first
+ * `__` after the prefix rather than on every underscore.
+ */
+function mcpServerOf(name) {
+  if (typeof name !== 'string' || !name.startsWith('mcp__')) return null
+  const rest = name.slice(5)
+  const sep = rest.indexOf('__')
+  return sep === -1 ? null : rest.slice(0, sep)
+}
+
+/**
+ * How far into each transcript the MCP-call scan has already read, by session id. Seeded to
+ * "the end of the file, right now" the first time a session is seen, rather than to zero —
+ * otherwise the very first scan of a machine with months of history would report every MCP
+ * call ever made as having "just happened," and would pay for parsing all of it besides.
+ */
+const mcpWatermark = new Map()
+
+/**
+ * MCP tool calls made since the last scan, across every thread that has a transcript. Reads
+ * only the bytes appended since the watermark — never a whole file — so this costs nothing
+ * on a quiet colony and stays cheap on a busy one.
+ */
+async function scanMcpCalls(threads) {
+  const calls = []
+  for (const t of threads) {
+    if (!t.transcriptFile || !t.cliSessionId) continue
+    const start = mcpWatermark.get(t.cliSessionId)
+    if (start === undefined) {
+      mcpWatermark.set(t.cliSessionId, t.sizeBytes || 0)
+      continue
+    }
+    if ((t.sizeBytes || 0) <= start) continue
+    let range
+    try {
+      range = await readRange(t.transcriptFile, start)
+    } catch {
+      continue
+    }
+    if (!range.text) continue
+    mcpWatermark.set(t.cliSessionId, range.end)
+    for (const r of jsonLines(range.text)) {
+      if (r.type !== 'assistant') continue
+      const content = r.message?.content
+      if (!Array.isArray(content)) continue
+      for (const c of content) {
+        if (c?.type !== 'tool_use') continue
+        const server = mcpServerOf(c.name)
+        if (!server) continue
+        calls.push({ id: t.id, project: t.project, server, tool: c.name, at: Date.parse(r.timestamp) || Date.now() })
+      }
+    }
+  }
+  return calls
 }
 
 /** Transcript metadata is expensive to parse, so keep it until the file changes. */
@@ -477,6 +537,18 @@ async function scanThreads() {
     // it — the only way a terminal-only thread can ask for anything at all.
     if (waiting) thread.unread = true
   }
+
+  // Which MCP tools got called since the last scan, grouped back onto the thread that made
+  // the call — additive on top of the fields above, so a harness that never sets it (or a
+  // future one that does not implement this at all) just leaves every thread's list empty.
+  const mcpCalls = await scanMcpCalls(threads)
+  const callsByThread = new Map()
+  for (const call of mcpCalls) {
+    if (!callsByThread.has(call.id)) callsByThread.set(call.id, [])
+    callsByThread.get(call.id).push(call)
+  }
+  for (const thread of threads) thread.mcpCalls = callsByThread.get(thread.id) || []
+
   return threads.map(toThread)
 }
 

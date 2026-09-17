@@ -255,7 +255,8 @@ export class Hud {
       this._slider('Field of view', 'fov', 20, 60, 1, (v) => `${v}°`),
       this._toggle('Project labels', 'showLabels'),
       this._toggle('Reduced motion', 'reducedMotion', 'Calms the bobbing and the camera easing.'),
-      this._toggle('Show FPS', 'showFps')
+      this._toggle('Show FPS', 'showFps'),
+      this._toggle('MCP switchboard', 'mcpSwitchboard', 'The relay tower that beams a plot — and glows its border — when a thread calls an MCP tool.')
     )
     body.appendChild(view)
 
