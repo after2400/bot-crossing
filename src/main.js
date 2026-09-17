@@ -15,6 +15,7 @@ import { shorelinePoints } from './world/planet.js'
 import { shipPosition } from './world/plots.js'
 import {
   fetchThreads,
+  fetchUsage,
   fetchState,
   saveState,
   openThread,
@@ -71,6 +72,9 @@ let hoverId = null
 let statusCursor = 0
 let busiestCursor = 0
 let pendingSave = 0
+/** The last usage figure the poll saw, so a budget-only settings change can redraw the
+ *  readout without waiting on the next poll. */
+let lastSpend = 0
 const hoverGround = new THREE.Vector3()
 
 // ── actions the HUD can trigger ────────────────────────────────────────────────────────
@@ -801,6 +805,18 @@ async function poll() {
   } finally {
     polling = false
   }
+
+  // Usage rides its own try/catch: a harness with no cost model to offer, or a scan that
+  // failed for some other reason, should never take the thread poll above down with it.
+  try {
+    const usage = await fetchUsage()
+    lastSpend = usage.spendThisMonth || 0
+    colony.setUsage(lastSpend)
+    hud.setUsage(lastSpend, settings.get('monthlyBudget'))
+    for (const delta of usage.deltas || []) colony.pulseSpend(delta.id, delta.usd)
+  } catch {
+    /* the canister just holds its last known reading */
+  }
 }
 
 function queueSave() {
@@ -880,6 +896,9 @@ settings.onChange((changed, scope) => {
   // rebuilt from the list rather than merely re-rendered.
   if (changed.has('hideDormant')) applyThreads(threads)
   if (changed.has('maxAgents')) applyThreads(threads)
+  // The canister recolours itself on a budget change without waiting on the next poll; the
+  // readout is plain text with no such wiring of its own, so it needs telling directly.
+  if (changed.has('monthlyBudget')) hud.setUsage(lastSpend, settings.get('monthlyBudget'))
 })
 
 // ── frame ─────────────────────────────────────────────────────────────────────────────

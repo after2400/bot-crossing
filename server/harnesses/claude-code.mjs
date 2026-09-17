@@ -18,6 +18,7 @@ import { existsSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { exists, findExecutable, jsonLines, listDirs, listFiles, num, readHead, readRange, readTail } from '../lib/fsutil.mjs'
+import { estimateCost } from '../usage.mjs'
 
 const HOME = os.homedir()
 
@@ -286,6 +287,106 @@ async function scanMcpCalls(threads) {
     }
   }
   return calls
+}
+
+/**
+ * Month-to-date spend per transcript, kept incremental once a thread has been scanned once.
+ *
+ * A byte watermark alone (as `scanMcpCalls` uses) is not enough here: on first sight of a
+ * thread — or the moment the calendar turns over — the number that matters is the *whole*
+ * month's spend so far, not "spend from here on," so those two cases pay for one full parse
+ * of the transcript. Every poll after that is cheap: only the bytes appended since the last
+ * look are read and added to the running total.
+ */
+const usageCache = new Map()
+
+const monthKeyOf = (d = new Date()) => `${d.getFullYear()}-${d.getMonth()}`
+const startOfMonthMs = (d = new Date()) => new Date(d.getFullYear(), d.getMonth(), 1).getTime()
+
+/**
+ * The CLI writes some assistant turns to the transcript twice — the same `message.id` and
+ * `requestId`, seen back to back a fraction of a second apart, evidently a streaming record
+ * and a finalized one rather than two distinct turns. Counting both roughly tripled the
+ * estimate against `ccusage`'s own numbers on a real transcript, which is what this dedupe
+ * is for: `seen` is one thread's running memory of every id it has already priced, kept
+ * alongside its running total so a later incremental read still catches a duplicate even if
+ * the two copies land in different polls.
+ */
+function costOfRecord(r, seen) {
+  if (r.type !== 'assistant') return 0
+  const id = r.message?.id
+  const key = id ? `${id}:${r.requestId || ''}` : null
+  if (key) {
+    if (seen.has(key)) return 0
+    seen.add(key)
+  }
+  return estimateCost(r.message?.usage, r.message?.model)
+}
+
+/**
+ * `{ totalUsd, deltaUsd }` for one transcript: the month's running total, and how much of it
+ * was added just now — `deltaUsd` is what tells the client a spend *just happened* here,
+ * versus this simply being the first time the total was reported. A full (re)scan reports
+ * a zero delta on purpose: it is catching a number up to where it already was, not a new
+ * spend event to animate.
+ */
+async function threadUsage(entry) {
+  const month = monthKeyOf()
+  const cached = usageCache.get(entry.id)
+  if (cached && cached.month === month && cached.mtime === entry.mtime) {
+    return { totalUsd: cached.totalUsd, deltaUsd: 0 }
+  }
+
+  if (cached && cached.month === month && entry.size >= cached.scannedBytes) {
+    let range
+    try {
+      range = await readRange(entry.file, cached.scannedBytes)
+    } catch {
+      return { totalUsd: cached.totalUsd, deltaUsd: 0 }
+    }
+    let added = 0
+    for (const r of jsonLines(range.text)) added += costOfRecord(r, cached.seen)
+    const totalUsd = cached.totalUsd + added
+    usageCache.set(entry.id, { mtime: entry.mtime, month, totalUsd, scannedBytes: range.end, seen: cached.seen })
+    return { totalUsd, deltaUsd: added }
+  }
+
+  // New thread, a new month, or a file that shrank/rotated out from under its cached size.
+  let text
+  try {
+    text = await fsp.readFile(entry.file, 'utf8')
+  } catch {
+    return { totalUsd: 0, deltaUsd: 0 }
+  }
+  const monthStart = startOfMonthMs()
+  const seen = new Set()
+  let totalUsd = 0
+  for (const r of jsonLines(text)) {
+    const t = Date.parse(r.timestamp || '')
+    if (!Number.isFinite(t) || t < monthStart) continue
+    totalUsd += costOfRecord(r, seen)
+  }
+  usageCache.set(entry.id, { mtime: entry.mtime, month, totalUsd, scannedBytes: entry.size, seen })
+  return { totalUsd, deltaUsd: 0 }
+}
+
+/**
+ * Estimated spend across every transcript this harness can see — machine-wide, not scoped to
+ * whichever repos happen to be on this colony's map, since the canister stands for the whole
+ * plan, not one project's slice of it. `deltas` are per-thread, for the client to animate a
+ * spend event on whichever agent it belongs to (and to silently drop if that thread's project
+ * is not part of this colony at all).
+ */
+export async function scanUsage() {
+  const transcripts = await scanTranscripts()
+  let spendThisMonth = 0
+  const deltas = []
+  for (const [id, entry] of transcripts) {
+    const { totalUsd, deltaUsd } = await threadUsage(entry)
+    spendThisMonth += totalUsd
+    if (deltaUsd > 0) deltas.push({ id: ID(id), usd: deltaUsd })
+  }
+  return { spendThisMonth, deltas }
 }
 
 /** Transcript metadata is expensive to parse, so keep it until the file changes. */
@@ -608,6 +709,7 @@ export default {
   /** Only claim this machine if one of the two stores is actually there. */
   detect: async () => (await exists(DESKTOP_SESSIONS)) || (await exists(CLI_PROJECTS)),
   scanThreads,
+  scanUsage,
   openThread,
   newSession,
   paths: { DESKTOP_SESSIONS, CLI_PROJECTS, CLI_LIVE },

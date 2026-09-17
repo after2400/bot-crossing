@@ -15,6 +15,7 @@ import {
   allocateCells,
   shipPosition,
   switchboardPosition,
+  canisterPosition,
   createLabel,
   hashString,
   worldToHex,
@@ -25,6 +26,8 @@ import {
 import { createBuilding, buildingUniforms, Scaffolds } from '../world/buildings.js'
 import { Ship } from '../world/ship.js'
 import { MCPSwitchboard } from '../world/mcpSwitchboard.js'
+import { UsageCanister, burnRatio, burnRateColor } from '../world/usageCanister.js'
+import { UsageBursts } from '../world/usageBursts.js'
 import { Astronauts } from '../agents/astronauts.js'
 import { Indicators, BADGE } from '../agents/indicators.js'
 import { MAX_AGENT_CAP } from '../core/settings.js'
@@ -162,6 +165,12 @@ export class Colony {
     this.ship = new Ship(scene, shipPosition())
     this.switchboard = new MCPSwitchboard(scene, switchboardPosition())
     this.switchboard.group.visible = settings.get('mcpSwitchboard')
+    this.usageCanister = new UsageCanister(scene, canisterPosition())
+    this.usageCanister.group.visible = settings.get('usageCanister')
+    this.usageBursts = new UsageBursts(scene)
+    /** Last spend total this colony was told about, so a budget change alone can recolour
+     *  the canister without waiting on the next poll's usage figure. */
+    this._lastSpend = 0
     this.astronauts = new Astronauts(scene, settings)
     this.astronauts.world = this._world()
     // Sized for the largest preset rather than the current one: unlike the astronaut meshes these
@@ -228,6 +237,8 @@ export class Colony {
     this.ship.group.position.y = terrainHeight(ship.x, ship.z, this.planet)
     const switchboard = switchboardPosition()
     this.switchboard.group.position.y = terrainHeight(switchboard.x, switchboard.z, this.planet)
+    const canister = canisterPosition()
+    this.usageCanister.group.position.y = terrainHeight(canister.x, canister.z, this.planet)
 
     this._dustTint.set(this.planet.ground.high)
 
@@ -300,6 +311,8 @@ export class Colony {
     list.push({ x: ship.x, z: ship.z })
     const switchboard = switchboardPosition()
     list.push({ x: switchboard.x, z: switchboard.z })
+    const canister = canisterPosition()
+    list.push({ x: canister.x, z: canister.z })
     return list.slice(0, SKY_MAX_CELLS)
   }
 
@@ -399,6 +412,8 @@ export class Colony {
     clear.push({ x: ship.x, z: ship.z, r: 7.5 })
     const switchboard = switchboardPosition()
     clear.push({ x: switchboard.x, z: switchboard.z, r: 6 })
+    const canister = canisterPosition()
+    clear.push({ x: canister.x, z: canister.z, r: 6 })
     this.scatterGroup = createScatter(this.planet, this.settings.get('scatterDensity'), clear, 4242, (x, z) => this.onIsland(x, z))
     this.worldGroup.add(this.scatterGroup)
     this._scatterFootprint = this._plotFootprint()
@@ -475,6 +490,14 @@ export class Colony {
         this.mcpPulses.clear()
       }
     }
+    if (changed.has('usageCanister')) {
+      const on = this.settings.get('usageCanister')
+      this.usageCanister.group.visible = on
+      if (!on) this.usageBursts.clear()
+    }
+    // A budget change alone should recolour and refill the canister without waiting on the
+    // next poll's usage figure — the number it is drawn against just moved.
+    if (changed.has('monthlyBudget')) this._applyUsage(this._lastSpend)
   }
 
   // ── roster ──────────────────────────────────────────────────────────────────────────
@@ -991,6 +1014,8 @@ export class Colony {
     buildingUniforms.uTime.value = elapsed
     this.ship.update(dt, elapsed, night)
     this.switchboard.update(dt, elapsed, night)
+    this.usageCanister.update(dt, elapsed, night)
+    this.usageBursts.update(dt)
 
     this._growBuildings(dt)
     this.astronauts.update(dt, elapsed)
@@ -1236,6 +1261,37 @@ export class Colony {
     this.mcpPulses.set(plot.id, MCP_PULSE_LIFETIME)
   }
 
+  /**
+   * Recolour and refill the usage canister for a new month-to-date spend figure. Kept apart
+   * from `pulseSpend`: this runs every poll regardless of whether anything new happened,
+   * while a pulse only fires on an actual delta.
+   */
+  setUsage(spendThisMonth) {
+    this._lastSpend = spendThisMonth
+    this._applyUsage(spendThisMonth)
+  }
+
+  _applyUsage(spendThisMonth) {
+    const budget = this.settings.get('monthlyBudget')
+    const fraction = budget > 0 ? spendThisMonth / budget : 0
+    const color = burnRateColor(burnRatio(spendThisMonth, budget))
+    this.usageCanister.setUsage(fraction, color)
+  }
+
+  /**
+   * Send a spend orb from the canister to whichever agent just spent something — called once
+   * per delta the poll saw. Silently does nothing for a thread whose project is not part of
+   * this colony's map, the same way `pulseMcpCall` does for an unmapped project.
+   */
+  pulseSpend(agentId, usd) {
+    if (!this.settings.get('usageCanister')) return
+    const agent = this.agentFor(agentId)
+    if (!agent) return
+    const from = this.usageCanister.emitWorld()
+    const to = new THREE.Vector3(agent.pos.x, agent.pos.y + 0.9, agent.pos.z)
+    this.usageBursts.fire(from, to, this.usageCanister.currentColor())
+  }
+
   setUiVisible(visible) {
     this.uiVisible = visible
     this._syncLabels()
@@ -1256,6 +1312,8 @@ export class Colony {
     this.water?.dispose()
     this.ship.dispose()
     this.switchboard.dispose()
+    this.usageCanister.dispose()
+    this.usageBursts.dispose()
     this.astronauts.dispose()
     this.indicators.dispose()
     this.particles.dispose()

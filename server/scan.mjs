@@ -87,6 +87,34 @@ export async function scanThreads() {
   return threads
 }
 
+/**
+ * Estimated dollar spend this month, across every harness that can compute one. `scanUsage`
+ * is optional on a harness — one that has no cost model to offer just contributes nothing to
+ * the total, the same way a harness with no threads contributes an empty list to `scanThreads`.
+ */
+export async function scanUsage() {
+  const harnesses = await detectedHarnesses()
+  const results = await Promise.all(
+    harnesses.map(async (h) => {
+      if (!h.scanUsage) return null
+      try {
+        return await h.scanUsage()
+      } catch (err) {
+        console.warn(`bot-crossing: harness "${h.id}" failed to scan usage —`, err?.message || err)
+        return null
+      }
+    })
+  )
+  let spendThisMonth = 0
+  const deltas = []
+  for (const r of results) {
+    if (!r) continue
+    spendThisMonth += r.spendThisMonth || 0
+    deltas.push(...(r.deltas || []))
+  }
+  return { spendThisMonth, deltas }
+}
+
 /** What the HUD shows in the harness list: who is installed, and what they can do. */
 export async function harnessStatus() {
   const detected = new Set((await detectedHarnesses()).map((h) => h.id))

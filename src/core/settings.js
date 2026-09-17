@@ -157,6 +157,10 @@ const DEFAULTS = {
   hideDormant: true,
   /** The relay tower that beams a plot when a thread calls an MCP tool, and its border glow. */
   mcpSwitchboard: true,
+  /** The tank of goo standing for this month's estimated spend against `monthlyBudget`. */
+  usageCanister: true,
+  /** What the canister fills and colours against. In dollars; adjust to match your own plan. */
+  monthlyBudget: 2000,
   timeOfDay: 0.32, // 0..1 — 0 is midnight, 0.5 is noon
   autoTime: false,
   /** Sky follows this machine's own clock. Wins over `autoTime`; both off is manual. */

@@ -64,8 +64,10 @@ const MAX_CELLS = 9
 const SHIP_CELL = { q: -2, r: 1 }
 /** The lattice cell the MCP switchboard owns. Nothing else may be placed there. */
 const SWITCHBOARD_CELL = { q: -2, r: -1 }
+/** The lattice cell the usage canister owns. Nothing else may be placed there. */
+const CANISTER_CELL = { q: 2, r: -1 }
 /** Every cell held by fixed colony furniture rather than a project. */
-const RESERVED_CELLS = [SHIP_CELL, SWITCHBOARD_CELL]
+const RESERVED_CELLS = [SHIP_CELL, SWITCHBOARD_CELL, CANISTER_CELL]
 
 const HEX_DIRS = [
   [1, 0],
@@ -327,6 +329,11 @@ export const shipPosition = () => {
 
 export const switchboardPosition = () => {
   const { x, z } = hexToWorld(SWITCHBOARD_CELL.q, SWITCHBOARD_CELL.r)
+  return new THREE.Vector3(x, 0, z)
+}
+
+export const canisterPosition = () => {
+  const { x, z } = hexToWorld(CANISTER_CELL.q, CANISTER_CELL.r)
   return new THREE.Vector3(x, 0, z)
 }
 

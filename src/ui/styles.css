@@ -720,6 +720,17 @@ body {
   border-bottom: 1px solid var(--line);
 }
 
+.usage-readout {
+  padding: 0 15px 11px;
+  font-size: 12px;
+  color: var(--muted);
+  flex: none;
+}
+
+.usage-readout:empty {
+  display: none;
+}
+
 .stat {
   display: inline-flex;
   align-items: center;

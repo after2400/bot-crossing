@@ -256,7 +256,17 @@ export class Hud {
       this._toggle('Project labels', 'showLabels'),
       this._toggle('Reduced motion', 'reducedMotion', 'Calms the bobbing and the camera easing.'),
       this._toggle('Show FPS', 'showFps'),
-      this._toggle('MCP switchboard', 'mcpSwitchboard', 'The relay tower that beams a plot — and glows its border — when a thread calls an MCP tool.')
+      this._toggle('MCP switchboard', 'mcpSwitchboard', 'The relay tower that beams a plot — and glows its border — when a thread calls an MCP tool.'),
+      this._toggle('Usage canister', 'usageCanister', 'The tank of goo standing for this month’s estimated spend, and the orbs it sends when an agent spends something.'),
+      this._slider(
+        'Monthly budget',
+        'monthlyBudget',
+        50,
+        5000,
+        50,
+        (v) => `$${v}`,
+        'What the usage canister fills and colours against. Set this to match your own plan — the estimate has no way to know it.'
+      )
     )
     body.appendChild(view)
 
@@ -472,6 +482,17 @@ export class Hud {
     btn.innerHTML = sound ? ICON.sound : ICON.soundOff
     btn.setAttribute('aria-pressed', String(sound))
     btn.title = sound ? 'Mute (M)' : 'Unmute (M)'
+  }
+
+  /** The plain-numbers backstop next to the usage canister — the visual is a gauge, not a
+   *  ledger, so the actual figures live here where they can be read exactly. */
+  setUsage(spendThisMonth, budget) {
+    const el = this.$('.usage-readout')
+    if (!el) return
+    const text = `$${Math.round(spendThisMonth).toLocaleString()} / $${Math.round(budget).toLocaleString()} this month`
+    if (this._last.usage === text) return
+    this._last.usage = text
+    el.textContent = text
   }
 
   setStats(stats) {
@@ -1059,6 +1080,7 @@ const TEMPLATE = `
   </header>
 
   <div class="stats"></div>
+  <div class="usage-readout"></div>
 
   <div class="side-body">
     <div class="projects-pane">
