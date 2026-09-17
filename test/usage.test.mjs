@@ -7,7 +7,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { estimateCost } from '../server/usage.mjs'
-import { burnRatio, burnRateColor, paceColor } from '../src/world/usageCanister.js'
+import { burnRatio, paceColor } from '../src/world/usageCanister.js'
 
 // ── estimateCost ──────────────────────────────────────────────────────────────
 
@@ -68,20 +68,7 @@ test('a zero or missing budget never divides by zero', () => {
   assert.equal(burnRatio(50, undefined), 1)
 })
 
-// ── burnRateColor ─────────────────────────────────────────────────────────────
-
-test('on-pace and over-pace burn ratios produce different colors', () => {
-  const calm = burnRateColor(0.5)
-  const hot = burnRateColor(2)
-  assert.notEqual(calm.getHexString(), hot.getHexString())
-})
-
-test('burn ratio color is stable well below and well above the transition band', () => {
-  assert.equal(burnRateColor(0.1).getHexString(), burnRateColor(0.5).getHexString())
-  assert.equal(burnRateColor(3).getHexString(), burnRateColor(10).getHexString())
-})
-
-// ── paceColor (the flag's traffic light, distinct from the goo's gradient) ─────
+// ── paceColor (shared traffic light for the goo and the flag) ──────────────────
 
 test('comfortably under pace is green, near pace is amber, over pace is red', () => {
   assert.equal(paceColor(0.5), 0x4caf6a)

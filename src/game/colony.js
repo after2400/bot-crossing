@@ -26,7 +26,7 @@ import {
 import { createBuilding, buildingUniforms, Scaffolds } from '../world/buildings.js'
 import { Ship } from '../world/ship.js'
 import { MCPSwitchboard } from '../world/mcpSwitchboard.js'
-import { UsageCanister, burnRatio, burnRateColor } from '../world/usageCanister.js'
+import { UsageCanister, burnRatio } from '../world/usageCanister.js'
 import { UsageBursts } from '../world/usageBursts.js'
 import { Astronauts } from '../agents/astronauts.js'
 import { Indicators, BADGE } from '../agents/indicators.js'
@@ -1273,9 +1273,12 @@ export class Colony {
 
   _applyUsage(spendThisMonth) {
     const budget = this.settings.get('monthlyBudget')
-    const fraction = budget > 0 ? spendThisMonth / budget : 0
+    // A full tank means plenty of budget left, an empty one means none — the same reading
+    // as a fuel gauge, and the one that agrees with the flag's own "N% left" text rather
+    // than fighting it.
+    const remaining = budget > 0 ? 1 - spendThisMonth / budget : 0
     const ratio = burnRatio(spendThisMonth, budget)
-    this.usageCanister.setUsage(fraction, burnRateColor(ratio), ratio)
+    this.usageCanister.setUsage(remaining, ratio)
   }
 
   /**

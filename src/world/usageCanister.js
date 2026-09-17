@@ -7,11 +7,13 @@ import { createLabel } from './plots.js'
  * against a configured monthly budget.
  *
  * Two numbers, two different readouts, deliberately kept apart:
- *  - **fill height** is `spend ÷ budget` — how much of the month's allowance is gone.
- *  - **colour** is the *burn rate* against the calendar — spending faster than the days used
- *    so far would justify runs hot, spending on or under pace stays cool — independent of
- *    fill. A tank that is only a quarter full on day three of the month is burning hot even
- *    though it looks nearly empty, and this is what tells you that at a glance.
+ *  - **fill height** is `1 − spend ÷ budget` — how much of the month's allowance is *left*,
+ *    a fuel gauge rather than an odometer: full means plenty of runway, empty means none.
+ *    This is also what the "N% left" flag above the tank says in words.
+ *  - **colour** — on the goo and on the flag alike — is a traffic light for the *burn rate*
+ *    against the calendar, independent of fill: green comfortably under pace, amber close to
+ *    it, red over. A tank that is three-quarters full on day three of the month still glows
+ *    red, because looking full is not the same as being on pace.
  */
 
 const TANK_RADIUS = 1.35
@@ -34,20 +36,9 @@ export function burnRatio(spendThisMonth, budget, now = new Date()) {
   return paceSoFar > 0 ? spendThisMonth / paceSoFar : 1
 }
 
-const CALM = new THREE.Color(0x4fa8c9)
-const HOT = new THREE.Color(0xd6543f)
-
-/** Cool at or under pace, hot over it — the transition centred on 1.0 rather than clamped hard
- *  at it, so pace does not flip the colour on the first cent over. */
-export function burnRateColor(ratio) {
-  const t = THREE.MathUtils.clamp((ratio - 0.75) / 0.65, 0, 1)
-  return CALM.clone().lerp(HOT, t)
-}
-
 /**
- * The flag's own colour — a traffic light rather than the goo's smooth gradient, because the
- * flag's job is a single yes/no/careful glance rather than a magnitude. Green comfortably
- * under pace, amber within shouting distance of it either way, red over.
+ * The traffic-light colour for the burn rate, shared by the goo and the flag: green
+ * comfortably under pace, amber within shouting distance of it either way, red over.
  */
 export function paceColor(ratio) {
   if (ratio < 0.85) return 0x4caf6a
@@ -65,8 +56,8 @@ export class UsageCanister {
 
     this._fraction = 0
     this._targetFraction = 0
-    this._color = CALM.clone()
-    this._targetColor = CALM.clone()
+    this._color = new THREE.Color(paceColor(1))
+    this._targetColor = this._color.clone()
 
     this._buildTank()
   }
@@ -151,8 +142,8 @@ export class UsageCanister {
    * colour actually changes — `createLabel` bakes its text to a canvas once, the same
    * technique a project's name plate uses, so it is not something to redo every frame.
    */
-  _updateFlag(fraction, ratio) {
-    const pct = Math.max(0, Math.round((1 - fraction) * 100))
+  _updateFlag(remaining, ratio) {
+    const pct = Math.round(remaining * 100)
     const color = paceColor(ratio)
     const key = `${pct}:${color}`
     if (this._flagKey === key) return
@@ -184,14 +175,13 @@ export class UsageCanister {
   }
 
   /**
-   * `fraction`: spend ÷ budget, 0..1+. `color`: the goo's burn-rate tint (see
-   * `burnRateColor`). `ratio`: the same burn ratio, for the flag's own traffic-light colour
-   * (see `paceColor`) — passed separately because the two colour schemes read the number
-   * differently and neither should have to reverse-engineer the other's tint to get it back.
+   * `remaining`: budget left ÷ budget, 0..1 — how full the tank should be. `ratio`: the burn
+   * rate against the calendar (see `burnRatio`), which drives the traffic-light colour on
+   * both the goo and the flag (see `paceColor`).
    */
-  setUsage(fraction, color, ratio = 1) {
-    this._targetFraction = THREE.MathUtils.clamp(fraction, 0, 1)
-    this._targetColor.set(color)
+  setUsage(remaining, ratio = 1) {
+    this._targetFraction = THREE.MathUtils.clamp(remaining, 0, 1)
+    this._targetColor.set(paceColor(ratio))
     this._updateFlag(this._targetFraction, ratio)
   }
 
