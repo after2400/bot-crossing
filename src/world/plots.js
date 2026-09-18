@@ -6,6 +6,7 @@ import { mulberry } from './planet.js'
 import { withCurve } from '../core/curve.js'
 import { OVERLAY_LAYER } from '../core/engine.js'
 import { BUILDING_RADIUS } from './buildings.js'
+import { HEX_DIRS, SHIP_CELL, ORIGIN, POOL_RINGS, cellKey as key, hexDistance } from './plot-move.js'
 
 /**
  * Project plots — the fenced-off sections of the map, one per repo.
@@ -60,8 +61,6 @@ const DECK_HEIGHT = DECK_TOP + DECK_SKIRT
 /** Building slots per cell: one in the middle and six around it. */
 const SLOTS_PER_CELL = 7
 const MAX_CELLS = 9
-/** The lattice cell the ship owns. Nothing else may be placed there. */
-const SHIP_CELL = { q: -2, r: 1 }
 /** The lattice cell the MCP switchboard owns. Nothing else may be placed there. */
 const SWITCHBOARD_CELL = { q: -2, r: -1 }
 /** The lattice cell the usage canister owns — the same column as the ship and the
@@ -70,26 +69,14 @@ const CANISTER_CELL = { q: -2, r: 0 }
 /** Every cell held by fixed colony furniture rather than a project. */
 const RESERVED_CELLS = [SHIP_CELL, SWITCHBOARD_CELL, CANISTER_CELL]
 
-const HEX_DIRS = [
-  [1, 0],
-  [1, -1],
-  [0, -1],
-  [-1, 0],
-  [-1, 1],
-  [0, 1],
-]
-
 /**
  * Edge j of a flat-top hexagon runs between the corners at 60j° and 60(j+1)°, so its
  * midpoint faces 60j+30°. This maps that edge to the neighbour sitting across it.
  */
 const EDGE_TO_DIR = [0, 5, 4, 3, 2, 1]
 
-const key = (q, r) => `${q},${r}`
-const ORIGIN = { q: 0, r: 0 }
-
 /** Flat-top axial hex → world. */
-function hexToWorld(q, r, size = CELL) {
+export function hexToWorld(q, r, size = CELL) {
   return { x: size * 1.5 * q, z: size * Math.sqrt(3) * (r + q / 2) }
 }
 
@@ -136,11 +123,6 @@ function hexRing(radius) {
 
 const cellsNeeded = (threadCount) =>
   Math.max(1, Math.min(MAX_CELLS, Math.ceil(threadCount / SLOTS_PER_CELL)))
-
-/** Hex distance in axial coordinates: the cube distance, halved. */
-function hexDistance(a, b) {
-  return (Math.abs(a.q - b.q) + Math.abs(a.q + a.r - b.q - b.r) + Math.abs(a.r - b.r)) / 2
-}
 
 /**
  * Hand out cells to projects, keeping every zone exactly where it already is.
@@ -245,7 +227,7 @@ function layOut(projects, previous) {
   for (const project of projects) {
     for (const cell of previous.get(project.id) || []) farthest = Math.max(farthest, hexDistance(cell, ORIGIN))
   }
-  for (let ring = 0; (pool.length < total + 30 || ring <= farthest) && ring < 12; ring++) {
+  for (let ring = 0; (pool.length < total + 30 || ring <= farthest) && ring < POOL_RINGS; ring++) {
     for (const cell of hexRing(ring)) {
       const k = key(cell.q, cell.r)
       if (reserved.has(k)) continue
