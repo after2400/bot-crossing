@@ -6,7 +6,18 @@ import { mulberry } from './planet.js'
 import { withCurve } from '../core/curve.js'
 import { OVERLAY_LAYER } from '../core/engine.js'
 import { BUILDING_RADIUS } from './buildings.js'
-import { HEX_DIRS, SHIP_CELL, ORIGIN, POOL_RINGS, cellKey as key, hexDistance } from './plot-move.js'
+import {
+  HEX_DIRS,
+  SHIP_CELL,
+  SWITCHBOARD_CELL,
+  CANISTER_CELL,
+  RESERVED_CELLS,
+  ORIGIN,
+  POOL_RINGS,
+  cellKey as key,
+  hexDistance,
+  isConnected,
+} from './plot-move.js'
 
 /**
  * Project plots — the fenced-off sections of the map, one per repo.
@@ -61,13 +72,6 @@ const DECK_HEIGHT = DECK_TOP + DECK_SKIRT
 /** Building slots per cell: one in the middle and six around it. */
 const SLOTS_PER_CELL = 7
 const MAX_CELLS = 9
-/** The lattice cell the MCP switchboard owns. Nothing else may be placed there. */
-const SWITCHBOARD_CELL = { q: -2, r: -1 }
-/** The lattice cell the usage canister owns — the same column as the ship and the
- *  switchboard, directly between them. Nothing else may be placed there. */
-const CANISTER_CELL = { q: -2, r: 0 }
-/** Every cell held by fixed colony furniture rather than a project. */
-const RESERVED_CELLS = [SHIP_CELL, SWITCHBOARD_CELL, CANISTER_CELL]
 
 /**
  * Edge j of a flat-top hexagon runs between the corners at 60j° and 60(j+1)°, so its
@@ -150,47 +154,6 @@ const cellsNeeded = (threadCount) =>
  * @param previous Map of id → cells from the last pass (or a saved colony file).
  * @returns Map of id → cells.
  */
-/**
- * Is the colony one landmass?
- *
- * Every zone is a contiguous blob of its own, but nothing has ever guaranteed the *union* of
- * them is — that held only because zones seed outward in spiral order from the middle, which
- * happens to leave no gaps when everybody who was ever placed is still on the map.
- *
- * Take repos away and the guarantee goes with it. The survivors keep the cells they held in the
- * bigger layout, which is the whole point of the stickiness, but if the zones between them have
- * gone those cells are now islands floating in the sea. That is what folding away dormant repos
- * does the first time it runs.
- *
- * The ship's cell — and the switchboard's — count as walkable here even though nobody may
- * claim them: a colony that happens to wrap around a piece of fixed furniture is not two
- * colonies.
- */
-function isConnected(out) {
-  const cells = new Map()
-  for (const [, list] of out) for (const c of list) cells.set(key(c.q, c.r), c)
-  if (cells.size < 2) return true
-  const furniture = RESERVED_CELLS.map((c) => key(c.q, c.r))
-  const passable = new Set([...cells.keys(), ...furniture])
-  const [start] = cells.keys()
-  const seen = new Set([start])
-  const queue = [cells.get(start)]
-  while (queue.length) {
-    const c = queue.pop()
-    for (const [dq, dr] of HEX_DIRS) {
-      const n = { q: c.q + dq, r: c.r + dr }
-      const k = key(n.q, n.r)
-      if (!passable.has(k) || seen.has(k)) continue
-      seen.add(k)
-      queue.push(n)
-    }
-  }
-  // Fixed furniture is a stepping stone, not a member: it does not have to be reached for
-  // the colony to be whole, and it does not count toward what has to be.
-  for (const k of furniture) seen.delete(k)
-  return seen.size === cells.size
-}
-
 export function allocateCells(projects, previous = new Map()) {
   const laid = layOut(projects, previous)
   // Remembering where a zone sat is worth a great deal, right up until it leaves the colony

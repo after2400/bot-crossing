@@ -18,6 +18,17 @@ export const HEX_DIRS = [
 
 /** The lattice cell the ship owns. Nothing else may be placed there. */
 export const SHIP_CELL = { q: -2, r: 1 }
+/** The lattice cell the MCP switchboard owns. Nothing else may be placed there. */
+export const SWITCHBOARD_CELL = { q: -2, r: -1 }
+/** The lattice cell the usage canister owns — the same column as the ship and the
+ *  switchboard, directly between them. Nothing else may be placed there. */
+export const CANISTER_CELL = { q: -2, r: 0 }
+/**
+ * Every cell held by fixed colony furniture rather than a project. All of it is a stepping
+ * stone for connectivity and off-limits for a drop, the same as the ship — a drag that only
+ * knew about the ship would happily park a zone on the switchboard or the canister.
+ */
+export const RESERVED_CELLS = [SHIP_CELL, SWITCHBOARD_CELL, CANISTER_CELL]
 
 export const ORIGIN = { q: 0, r: 0 }
 
@@ -48,15 +59,16 @@ export function hexDistance(a, b) {
  * gone those cells are now islands floating in the sea. That is what folding away dormant repos
  * does the first time it runs.
  *
- * The ship's cell counts as walkable here even though nobody may claim it: a colony that
- * happens to wrap around the ship is not two colonies.
+ * The ship's cell — and every other piece of fixed furniture — counts as walkable here even
+ * though nobody may claim it: a colony that happens to wrap around a piece of furniture is
+ * not two colonies.
  */
 export function isConnected(out) {
   const cells = new Map()
   for (const [, list] of out) for (const c of list) cells.set(cellKey(c.q, c.r), c)
   if (cells.size < 2) return true
-  const ship = cellKey(SHIP_CELL.q, SHIP_CELL.r)
-  const passable = new Set([...cells.keys(), ship])
+  const furniture = RESERVED_CELLS.map((c) => cellKey(c.q, c.r))
+  const passable = new Set([...cells.keys(), ...furniture])
   const [start] = cells.keys()
   const seen = new Set([start])
   const queue = [cells.get(start)]
@@ -70,9 +82,9 @@ export function isConnected(out) {
       queue.push(n)
     }
   }
-  // The ship is a stepping stone, not a member: it does not have to be reached for the colony
-  // to be whole, and it does not count toward what has to be.
-  seen.delete(ship)
+  // Furniture is a stepping stone, not a member: it does not have to be reached for the
+  // colony to be whole, and it does not count toward what has to be.
+  for (const k of furniture) seen.delete(k)
   return seen.size === cells.size
 }
 
@@ -101,10 +113,10 @@ export function fits(layout, name, dq, dr) {
     if (id === name) continue
     for (const c of list) occupied.add(cellKey(c.q, c.r))
   }
-  const ship = cellKey(SHIP_CELL.q, SHIP_CELL.r)
+  const furniture = new Set(RESERVED_CELLS.map((c) => cellKey(c.q, c.r)))
   for (const c of moved) {
     const k = cellKey(c.q, c.r)
-    if (k === ship || occupied.has(k)) return false
+    if (furniture.has(k) || occupied.has(k)) return false
     if (hexDistance(c, ORIGIN) >= POOL_RINGS) return false
   }
   return true
@@ -133,7 +145,7 @@ export function moveIsValid(layout, name, dq, dr) {
 export function componentsOf(layout) {
   const owner = new Map()
   for (const [name, list] of layout) for (const c of list) owner.set(cellKey(c.q, c.r), name)
-  const ship = cellKey(SHIP_CELL.q, SHIP_CELL.r)
+  const furniture = new Set(RESERVED_CELLS.map((c) => cellKey(c.q, c.r)))
 
   const groups = []
   const placed = new Set()
@@ -141,8 +153,8 @@ export function componentsOf(layout) {
     if (placed.has(name)) continue
     const group = new Set([name])
     placed.add(name)
-    // Walk cells, not zones: two zones are in the same group when their cells touch, and the
-    // ship is a stepping stone between them the same way it is for `isConnected`.
+    // Walk cells, not zones: two zones are in the same group when their cells touch, and
+    // furniture is a stepping stone between them the same way it is for `isConnected`.
     const seen = new Set()
     const queue = [...(layout.get(name) || [])]
     for (const c of queue) seen.add(cellKey(c.q, c.r))
@@ -153,7 +165,7 @@ export function componentsOf(layout) {
         const k = cellKey(n.q, n.r)
         if (seen.has(k)) continue
         const who = owner.get(k)
-        if (!who && k !== ship) continue
+        if (!who && !furniture.has(k)) continue
         seen.add(k)
         if (who && !placed.has(who)) {
           placed.add(who)
@@ -167,14 +179,14 @@ export function componentsOf(layout) {
   return groups
 }
 
-/** Does this zone share an edge with any other zone, or with the ship it may step across? */
+/** Does this zone share an edge with any other zone, or with furniture it may step across? */
 function touchesOthers(layout, name) {
   const others = new Set()
   for (const [id, list] of layout) {
     if (id === name) continue
     for (const c of list) others.add(cellKey(c.q, c.r))
   }
-  others.add(cellKey(SHIP_CELL.q, SHIP_CELL.r))
+  for (const c of RESERVED_CELLS) others.add(cellKey(c.q, c.r))
   for (const c of layout.get(name)) {
     for (const [dq, dr] of HEX_DIRS) if (others.has(cellKey(c.q + dq, c.r + dr))) return true
   }
@@ -247,7 +259,7 @@ export function planMove(layout, name, dq, dr) {
 
   const stranded = groups.filter((g) => g !== anchor).sort((a, b) => b.size - a.size)
 
-  const ship = cellKey(SHIP_CELL.q, SHIP_CELL.r)
+  const furniture = new Set(RESERVED_CELLS.map((c) => cellKey(c.q, c.r)))
   const placed = new Set()
   for (const zone of anchor) for (const c of after.get(zone)) placed.add(cellKey(c.q, c.r))
 
@@ -262,7 +274,7 @@ export function planMove(layout, name, dq, dr) {
         const q = c.q + o.dq
         const r = c.r + o.dr
         const k = cellKey(q, r)
-        if (k === ship || placed.has(k)) return false
+        if (furniture.has(k) || placed.has(k)) return false
         if (hexDistance({ q, r }, ORIGIN) >= POOL_RINGS) return false
         if (touches) continue
         for (const [nq, nr] of HEX_DIRS) {

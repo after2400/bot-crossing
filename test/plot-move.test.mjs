@@ -5,7 +5,16 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { SHIP_CELL, componentsOf, isConnected, moveIsValid, planMove, translateCells } from '../src/world/plot-move.js'
+import {
+  SHIP_CELL,
+  SWITCHBOARD_CELL,
+  CANISTER_CELL,
+  componentsOf,
+  isConnected,
+  moveIsValid,
+  planMove,
+  translateCells,
+} from '../src/world/plot-move.js'
 
 const layout = (zones) => new Map(Object.entries(zones))
 
@@ -40,6 +49,12 @@ test('the ship\'s cell is refused even when nothing else claims it', () => {
   assert.equal(moveIsValid(zones, 'a', SHIP_CELL.q, SHIP_CELL.r - 1), false)
 })
 
+test('the switchboard\'s and canister\'s cells are refused the same as the ship\'s', () => {
+  const zones = layout({ a: [{ q: 0, r: 0 }] })
+  assert.equal(moveIsValid(zones, 'a', SWITCHBOARD_CELL.q, SWITCHBOARD_CELL.r), false)
+  assert.equal(moveIsValid(zones, 'a', CANISTER_CELL.q, CANISTER_CELL.r), false)
+})
+
 test('a move that splits the colony into islands is refused', () => {
   const zones = layout({ a: [{ q: 0, r: 0 }], b: [{ q: 1, r: 0 }] })
   // (6, 5) is well inside the allocator's pool but touches nothing.
@@ -61,7 +76,17 @@ test('a move past the allocator\'s pool is refused — it would lose its ground 
 
 test('the ship bridges two zones without counting as one', () => {
   // Both cells neighbour the ship and nothing else: whole through it, split without it.
-  const bridged = layout({ a: [{ q: -2, r: 0 }], b: [{ q: -2, r: 2 }] })
+  // (-3, 1) rather than the switchboard/canister's own column, so this pins the ship's
+  // bridging alone rather than any other piece of furniture.
+  const bridged = layout({ a: [{ q: -3, r: 1 }], b: [{ q: -2, r: 2 }] })
+  assert.equal(isConnected(bridged), true)
+})
+
+test('the switchboard and the canister bridge zones the same way the ship does', () => {
+  // The ship and the switchboard are not themselves neighbours — two cells apart in the same
+  // column — so a is reachable from b only by stepping through the canister sitting between
+  // them, on top of the ship-to-switchboard leg either side of it.
+  const bridged = layout({ a: [{ q: -1, r: 1 }], b: [{ q: -3, r: -1 }] })
   assert.equal(isConnected(bridged), true)
 })
 
