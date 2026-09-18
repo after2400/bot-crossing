@@ -210,26 +210,23 @@ test('an absent Codex is simply not detected', async () => {
 /**
  * A Claude Code home with one live CLI session and one subagent under it. The pid is this
  * process's own, which is the only pid a test can be sure is alive when the scan probes it.
+ * Returns the paths a test needs to reach back in and append to either transcript later.
  */
 async function fakeClaudeWithErrands(errandRecords) {
   const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'claude-home-'))
   const session = '11111111-2222-4333-8444-555555555555'
   const project = path.join(home, '.claude', 'projects', '-tmp-demo')
+  const mainFile = path.join(project, `${session}.jsonl`)
+  const subagentFile = path.join(project, session, 'subagents', 'agent-abc.jsonl')
   await fsp.mkdir(path.join(project, session, 'subagents'), { recursive: true })
   await fsp.mkdir(path.join(home, '.claude', 'sessions'), { recursive: true })
-  await fsp.writeFile(
-    path.join(project, `${session}.jsonl`),
-    `${JSON.stringify({ type: 'user', cwd: '/tmp/demo', message: { content: 'build the thing' } })}\n`
-  )
+  await fsp.writeFile(mainFile, `${JSON.stringify({ type: 'user', cwd: '/tmp/demo', message: { content: 'build the thing' } })}\n`)
   await fsp.writeFile(
     path.join(home, '.claude', 'sessions', `${process.pid}.json`),
     JSON.stringify({ pid: process.pid, sessionId: session, cwd: '/tmp/demo', status: 'busy' })
   )
-  await fsp.writeFile(
-    path.join(project, session, 'subagents', 'agent-abc.jsonl'),
-    errandRecords.map((r) => `${JSON.stringify(r)}\n`).join('')
-  )
-  return home
+  await fsp.writeFile(subagentFile, errandRecords.map((r) => `${JSON.stringify(r)}\n`).join(''))
+  return { home, session, project, mainFile, subagentFile }
 }
 
 async function claudeWithErrands(home) {
@@ -245,7 +242,7 @@ test('a running subagent is reported with the brief it was given, however long t
   // Longer than any head this could reasonably read at once: a brief that is truncated away
   // yields no task at all, because readHead drops the line it lands in the middle of.
   const brief = `repair the raster pipeline ${'x'.repeat(20 * 1024)}`
-  const home = await fakeClaudeWithErrands([{ type: 'user', message: { content: brief } }, midTurn])
+  const { home } = await fakeClaudeWithErrands([{ type: 'user', message: { content: brief } }, midTurn])
   const h = await claudeWithErrands(home)
   const [thread] = await h.scanThreads()
   assert.equal(thread.subagents?.length, 1)
@@ -257,13 +254,46 @@ test('a running subagent is reported with the brief it was given, however long t
 
 test('a subagent that has handed its answer back is finished, however recently it wrote', async () => {
   const realHome = process.env.HOME
-  const home = await fakeClaudeWithErrands([
+  const { home } = await fakeClaudeWithErrands([
     { type: 'user', message: { content: 'summarise the diff' } },
     { type: 'assistant', message: { content: [{ type: 'text', text: 'here it is' }], stop_reason: 'end_turn' } },
   ])
   const h = await claudeWithErrands(home)
   const [thread] = await h.scanThreads()
   assert.equal(thread.subagents, undefined, 'a finished errand is not an astronaut on the map')
+  process.env.HOME = realHome
+  await fsp.rm(home, { recursive: true, force: true })
+})
+
+// ── MCP calls ───────────────────────────────────────────────────────────────
+
+const mcpToolUse = (name) => ({
+  type: 'assistant',
+  timestamp: '2026-09-18T12:00:00.000Z',
+  message: { id: 'msg_1', content: [{ type: 'tool_use', name }] },
+})
+
+test('an MCP call inside a subagent transcript is reported same as one in the parent', async () => {
+  const realHome = process.env.HOME
+  const { home, mainFile, subagentFile } = await fakeClaudeWithErrands([
+    { type: 'user', message: { content: 'do the thing' } },
+    midTurn,
+  ])
+  const h = await claudeWithErrands(home)
+
+  // The first scan only seeds each file's watermark — nothing has happened "since" a scan
+  // that has never run before, so a call already sitting in either file at that point must
+  // not be reported.
+  const [seeded] = await h.scanThreads()
+  assert.equal(seeded.mcpCalls?.length ?? 0, 0)
+
+  await fsp.appendFile(mainFile, `${JSON.stringify(mcpToolUse('mcp__ccd_session__mark_chapter'))}\n`)
+  await fsp.appendFile(subagentFile, `${JSON.stringify(mcpToolUse('mcp__ccd_view__show_pane'))}\n`)
+
+  const [after] = await h.scanThreads()
+  const servers = (after.mcpCalls || []).map((c) => c.server).sort()
+  assert.deepEqual(servers, ['ccd_session', 'ccd_view'], 'both the parent\'s call and the errand\'s own are attributed to it')
+
   process.env.HOME = realHome
   await fsp.rm(home, { recursive: true, force: true })
 })
@@ -633,6 +663,37 @@ async function listing(dir) {
   }
   return out.sort()
 }
+
+test('on a duplicate session id across two project dirs, the newer file wins', async () => {
+  // A session id is only unique per directory it has run in: resuming one from a git worktree
+  // writes a second `<id>.jsonl` under a different project dir rather than moving the first,
+  // and relocating it back out leaves the worktree's copy stale. Directory names are chosen so
+  // that a plain "last one written to the map wins" (no mtime check at all) would pick the
+  // stale one — `-tmp-worktree` sorts after `-tmp-live` in `readdir`'s own order.
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'claude-dup-'))
+  const configDir = path.join(root, 'claude')
+  const liveProject = path.join(configDir, 'projects', '-tmp-live')
+  const staleProject = path.join(configDir, 'projects', '-tmp-worktree')
+  await fsp.mkdir(liveProject, { recursive: true })
+  await fsp.mkdir(staleProject, { recursive: true })
+  await fsp.writeFile(
+    path.join(liveProject, `${SESSION_ID}.jsonl`),
+    `${JSON.stringify(typed('the live session, still being written'))}\n`
+  )
+  await fsp.writeFile(
+    path.join(staleProject, `${SESSION_ID}.jsonl`),
+    `${JSON.stringify(typed('stale copy left behind in a worktree'))}\n`
+  )
+  const now = Date.now()
+  await fsp.utimes(path.join(staleProject, `${SESSION_ID}.jsonl`), new Date(now - 60_000), new Date(now - 60_000))
+  await fsp.utimes(path.join(liveProject, `${SESSION_ID}.jsonl`), new Date(now), new Date(now))
+
+  const h = await claudeWith({ configDir, desktop: path.join(root, 'claude-code-sessions') })
+  const threads = await h.scanThreads()
+  assert.equal(threads.length, 1, 'one session id is one thread, whichever directory won')
+  assert.equal(threads[0].preview, 'the live session, still being written')
+  await fsp.rm(root, { recursive: true, force: true })
+})
 
 test('a thread deleted in the desktop app is reported archived, not dropped', async () => {
   const fx = await fakeClaude({ transcript: [typed('tidy the ledger')] })

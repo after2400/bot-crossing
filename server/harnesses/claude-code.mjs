@@ -226,7 +226,16 @@ function decodeProjectDir(name) {
   return name.startsWith('-') ? '/' + name.slice(1).replace(/-/g, '/') : name
 }
 
-/** Index every CLI transcript on disk, keyed by session id. */
+/**
+ * Index every CLI transcript on disk, keyed by session id.
+ *
+ * A session id is only unique *per directory* it has ever run in — resuming it from a git
+ * worktree, or any other second checkout, writes a second `<id>.jsonl` under a different
+ * `projectDir` rather than moving the first. Without a tiebreaker the later `listDirs` entry
+ * would win regardless of which copy is actually live, so a worktree's now-stale copy could
+ * overwrite the real one just by sorting after it. The newer file is always the live one: an
+ * abandoned copy stops being written to the moment the session moves on.
+ */
 async function scanTranscripts() {
   const byId = new Map()
   for (const projectDir of await listDirs(CLI_PROJECTS)) {
@@ -238,6 +247,8 @@ async function scanTranscripts() {
       } catch {
         continue
       }
+      const existing = byId.get(id)
+      if (existing && existing.mtime >= stat.mtimeMs) continue
       byId.set(id, { id, file, projectDir, size: stat.size, mtime: stat.mtimeMs })
     }
   }
@@ -297,47 +308,93 @@ function mcpServerOf(name) {
 }
 
 /**
- * How far into each transcript the MCP-call scan has already read, by session id. Seeded to
- * "the end of the file, right now" the first time a session is seen, rather than to zero —
- * otherwise the very first scan of a machine with months of history would report every MCP
- * call ever made as having "just happened," and would pay for parsing all of it besides.
+ * How far into each transcript the MCP-call scan has already read, by session id for a
+ * parent transcript and by absolute path for a subagent's own file (a subagent has no session
+ * id of its own to key on). Seeded to "the end of the file, right now" the first time a file
+ * is seen, rather than to zero — otherwise the very first scan of a machine with months of
+ * history would report every MCP call ever made as having "just happened," and would pay for
+ * parsing all of it besides.
  */
 const mcpWatermark = new Map()
+const mcpSubagentWatermark = new Map()
+
+/** Every `tool_use` record past `start` that names an MCP tool, plus how far the read reached. */
+async function mcpCallsSince(file, start) {
+  let range
+  try {
+    range = await readRange(file, start)
+  } catch {
+    return null
+  }
+  if (!range.text) return { calls: [], end: range.end }
+  const calls = []
+  for (const r of jsonLines(range.text)) {
+    if (r.type !== 'assistant') continue
+    const content = r.message?.content
+    if (!Array.isArray(content)) continue
+    for (const c of content) {
+      if (c?.type !== 'tool_use') continue
+      const server = mcpServerOf(c.name)
+      if (!server) continue
+      calls.push({ server, tool: c.name, at: Date.parse(r.timestamp) || Date.now() })
+    }
+  }
+  return { calls, end: range.end }
+}
 
 /**
- * MCP tool calls made since the last scan, across every thread that has a transcript. Reads
- * only the bytes appended since the watermark — never a whole file — so this costs nothing
- * on a quiet colony and stays cheap on a busy one.
+ * MCP tool calls made since the last scan, across every thread that has a transcript — its
+ * own, and any subagent it has out. Reads only the bytes appended since each file's watermark
+ * — never a whole file — so this costs nothing on a quiet colony and stays cheap on a busy
+ * one. A subagent's calls are reported under its parent's id: there is no separate zone for an
+ * errand to light up, so the beam belongs to whoever sent it.
  */
 async function scanMcpCalls(threads) {
   const calls = []
+  const seenSubagentFiles = new Set()
   for (const t of threads) {
     if (!t.transcriptFile || !t.cliSessionId) continue
     const start = mcpWatermark.get(t.cliSessionId)
     if (start === undefined) {
       mcpWatermark.set(t.cliSessionId, t.sizeBytes || 0)
-      continue
-    }
-    if ((t.sizeBytes || 0) <= start) continue
-    let range
-    try {
-      range = await readRange(t.transcriptFile, start)
-    } catch {
-      continue
-    }
-    if (!range.text) continue
-    mcpWatermark.set(t.cliSessionId, range.end)
-    for (const r of jsonLines(range.text)) {
-      if (r.type !== 'assistant') continue
-      const content = r.message?.content
-      if (!Array.isArray(content)) continue
-      for (const c of content) {
-        if (c?.type !== 'tool_use') continue
-        const server = mcpServerOf(c.name)
-        if (!server) continue
-        calls.push({ id: t.id, project: t.project, server, tool: c.name, at: Date.parse(r.timestamp) || Date.now() })
+    } else if ((t.sizeBytes || 0) > start) {
+      const result = await mcpCallsSince(t.transcriptFile, start)
+      if (result) {
+        mcpWatermark.set(t.cliSessionId, result.end)
+        for (const c of result.calls) calls.push({ id: t.id, project: t.project, ...c })
       }
     }
+
+    // Subagent transcripts live one level below the parent's own file — see `scanSubagents`.
+    // Only a live parent can still be writing one, so a finished thread's errands are not
+    // worth a directory listing every poll; whatever they called was already caught while
+    // they were still running.
+    if (!t.hasLiveProcess) continue
+    const subagentDir = path.join(path.dirname(t.transcriptFile), t.cliSessionId, 'subagents')
+    for (const file of await listFiles(subagentDir, (n) => n.endsWith('.jsonl'))) {
+      seenSubagentFiles.add(file)
+      let stat
+      try {
+        stat = await fsp.stat(file)
+      } catch {
+        continue
+      }
+      const subStart = mcpSubagentWatermark.get(file)
+      if (subStart === undefined) {
+        mcpSubagentWatermark.set(file, stat.size)
+        continue
+      }
+      if (stat.size <= subStart) continue
+      const result = await mcpCallsSince(file, subStart)
+      if (!result) continue
+      mcpSubagentWatermark.set(file, result.end)
+      for (const c of result.calls) calls.push({ id: t.id, project: t.project, ...c })
+    }
+  }
+  // Subagent files are short-lived, so their watermarks are pruned to what this pass actually
+  // found rather than left to grow for the life of the process.
+  for (const file of mcpSubagentWatermark.keys()) {
+    if (!seenSubagentFiles.has(file)) mcpSubagentWatermark.delete(file)
   }
   return calls
 }
