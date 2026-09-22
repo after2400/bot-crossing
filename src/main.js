@@ -1251,7 +1251,7 @@ engine.add({
       if (!agent) select(null, {})
       else hud.placeCard(screenOf(agent))
     }
-    hud.setFps(engine.perf, engine.viewport, `${colony.astronauts.visibleCount} crew · ${colony.particles.liveCount} bits`)
+    hud.setFps(engine.perf, engine.viewport, `${colony.astronauts.visibleCount} bots · ${colony.particles.liveCount} bits`)
     ambience.update(dt, engine.camera, soundWorld())
   },
 })
