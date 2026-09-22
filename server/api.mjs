@@ -17,8 +17,14 @@ import {
 } from './scan.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
+// BOT_CROSSING_STATE names the state file itself (absolute, or relative to the
+// repo root), so a synced checkout can keep one file per machine — e.g.
+// BOT_CROSSING_STATE="data/$(hostname -s)-colony.json". It wins over
+// BOT_CROSSING_DATA, which keeps meaning "the directory holding colony.json".
 const DATA_DIR = process.env.BOT_CROSSING_DATA || path.join(here, '..', 'data')
-const STATE_FILE = path.join(DATA_DIR, 'colony.json')
+const STATE_FILE = process.env.BOT_CROSSING_STATE
+  ? path.resolve(here, '..', process.env.BOT_CROSSING_STATE)
+  : path.join(DATA_DIR, 'colony.json')
 
 const STATE_VERSION = 2
 
@@ -128,7 +134,7 @@ async function writeState(next) {
     settings: next.settings && typeof next.settings === 'object' ? next.settings : null,
     updatedAt: Date.now(),
   }
-  await fsp.mkdir(DATA_DIR, { recursive: true })
+  await fsp.mkdir(path.dirname(STATE_FILE), { recursive: true })
   const tmp = `${STATE_FILE}.${process.pid}.${++tmpSeq}.tmp`
   try {
     await fsp.writeFile(tmp, JSON.stringify(state, null, 2))
