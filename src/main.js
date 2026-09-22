@@ -23,7 +23,9 @@ import {
   openThread,
   newSession,
   revealFolder,
+  fetchHarnesses,
 } from './game/api.js'
+import { sortHarnessChoices, harnessReason } from './game/harnesses.js'
 import { hideProject, hiddenCatalog, unhideProject } from './game/hidden-projects.js'
 import { withErrands } from './game/errands.js'
 
@@ -73,6 +75,8 @@ let selectedId = null
 let selectedProject = null
 let hoverId = null
 let statusCursor = 0
+/** Sorted `/api/harnesses` answer, fetched on first picker open — see `harnessChoices`. */
+let harnessChoicesCache = null
 let busiestCursor = 0
 let pendingSave = 0
 /** The last usage figure the poll saw, so a budget-only settings change can redraw the
@@ -223,24 +227,51 @@ const actions = {
   /**
    * A new thread in this repo. The desktop app opens an empty session with the folder as
    * its workspace — nothing here is resumed, and nothing is written to disk.
+   *
+   * `harnessId` comes from the picker menu; empty means the repo's most-used harness,
+   * which is also what the `C` key and the button's main face do. `projectName` is the
+   * zone the menu was opened on — the picker survives polls, so it cannot trust that the
+   * selection is still the same zone by the time a row is clicked.
    */
-  newConversation: async () => {
-    const name = selectedProject
+  newConversation: async (harnessId, projectName) => {
+    const name = projectName || selectedProject
     const folder = name && pathForProject(name)
     if (!folder) {
       hud.toast('No folder on disk for that project', 'err')
       return
     }
     try {
-      const harness = harnessForProject(name)
+      const harness = harnessId || harnessForProject(name)
       const shown = await newSession(folder, harness, settings.get('openIn'))
-      const label = harnessLabel(harness)
+      const label = labelForHarness(harness)
       hud.toast(`New thread in ${name} — ${shown.via === 'terminal' ? `${label} in a terminal` : `opening ${label}`}`)
       // It lands as an astronaut walking down the ramp, once it has a record to scan.
       setTimeout(poll, 6000)
     } catch (err) {
       hud.toast(err.message || 'Could not start a thread there', 'err')
     }
+  },
+
+  /**
+   * Rows for the New-conversation picker. Fetched lazily on first open and cached:
+   * installing a harness mid-session leaves the menu one restart stale, and the
+   * alternative is a request on every poll for a menu rarely opened.
+   */
+  harnessChoices: async () => {
+    if (!harnessChoicesCache) {
+      try {
+        harnessChoicesCache = sortHarnessChoices(await fetchHarnesses())
+      } catch (err) {
+        hud.toast(err.message || 'Could not list harnesses', 'err')
+        return []
+      }
+    }
+    return harnessChoicesCache.map((h) => ({
+      id: h.id,
+      name: h.name,
+      detected: h.detected === true,
+      reason: harnessReason(h),
+    }))
   },
 
   revealProject: async () => {
@@ -426,6 +457,13 @@ function harnessLabel(id) {
     if (thread.harness === id && thread.harnessName) return thread.harnessName
   }
   return 'your harness'
+}
+
+/** Picker names first (it knows every harness), threads second, then the fallback. */
+function labelForHarness(id) {
+  const known = (harnessChoicesCache || []).find((h) => h.id === id)
+  if (known?.name) return known.name
+  return harnessLabel(id)
 }
 
 /**
@@ -960,6 +998,7 @@ window.addEventListener('keydown', (e) => {
       break
     // One step at a time, outward: the drag in hand, the thread, then the zone.
     case 'Escape':
+      if (hud.closeHarnessMenu?.()) break
       if (drag.lifted || drag.timer) {
         cancelHold()
         if (drag.lifted) {

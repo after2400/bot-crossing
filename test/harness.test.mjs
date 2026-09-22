@@ -11,9 +11,11 @@ import os from 'node:os'
 import path from 'node:path'
 import kilocode from '../server/harnesses/kilocode.mjs'
 import antigravity from '../server/harnesses/antigravity.mjs'
-import opencode from '../server/harnesses/opencode.mjs'
+import opencode, { defaultDbFiles } from '../server/harnesses/opencode.mjs'
 
 import { HARNESSES } from '../server/harnesses/index.mjs'
+import { avatarMode, drawHarnessMark, HARNESS_MARKS, harnessMark } from '../src/ui/harness-marks.js'
+import { DEFAULTS } from '../src/core/settings.js'
 import codex from '../server/harnesses/codex.mjs'
 import claudeCode from '../server/harnesses/claude-code.mjs'
 import { readTail, findExecutable } from '../server/lib/fsutil.mjs'
@@ -427,7 +429,8 @@ test('opencode lists only top-level sessions with mapped fields', async () => {
     assert.equal(t.title, 'Fix the thing')
     assert.equal(t.preview, 'ship the thing')
     assert.equal(t.model, 'muse-spark')
-    assert.equal(t.canOpen, false)
+    // Provisional: the open-session link is kept while its support is verified.
+    assert.equal(t.canOpen, true)
     assert.deepEqual(t.ref, { sessionId: OPENCODE_SESSION, cwd: '/tmp/demo' })
     assert.ok(t.sizeBytes > 0, 'sizeBytes is transcript bytes, not a token count')
   } finally {
@@ -544,23 +547,125 @@ test('a message-level abort is the user stopping, but a provider error is a fail
   }
 })
 
-test('opencode refuses untrusted refs and offers no per-thread link', async () => {  const { home, h } = await fakeOpencode()
+test('opencode refuses untrusted refs and opens valid ones through open-session', async () => {
+  const { home, h } = await fakeOpencode()
   try {
     const uuid = OPENCODE_SESSION
-    assert.equal(h.openThread({ sessionId: [uuid] }).ok, false)
-    assert.equal(h.openThread({ sessionId: { toString: () => uuid } }).ok, false)
-    assert.equal(h.openThread({ sessionId: uuid }).ok, false)
-    assert.equal(h.openThread(null).ok, false)
-    assert.equal(h.openThread({}).ok, false)
-    const opened = await h.newSession('/tmp/some repo')
+    assert.equal((await h.openThread({ sessionId: [uuid] })).ok, false)
+    assert.equal((await h.openThread({ sessionId: { toString: () => uuid } })).ok, false)
+    assert.equal((await h.openThread({ sessionId: uuid })).ok, false)
+    assert.equal((await h.openThread(null)).ok, false)
+    assert.equal((await h.openThread({})).ok, false)
+    assert.equal((await h.openThread({ sessionId: 'not a session id', cwd: '/tmp/demo' })).ok, false)
+    // Provisional route, kept while its support in the installed build is verified.
+    const opened = await h.openThread({ sessionId: uuid, cwd: '/tmp/demo' })
     assert.equal(opened.ok, true)
-    assert.equal(schemeOf(opened.url), 'opencode')
-    assert.ok(opened.url.includes('directory='), 'the directory rides along')
+    const url = new URL(opened.url)
+    assert.equal(url.hostname, 'open-session')
+    assert.equal(url.searchParams.get('server'), 'sidecar')
+    assert.equal(url.searchParams.get('session'), uuid)
+    const created = await h.newSession('/tmp/some repo')
+    assert.equal(created.ok, true)
+    assert.equal(schemeOf(created.url), 'opencode')
+    assert.ok(created.url.includes('directory='), 'the directory rides along')
     assert.equal((await h.newSession('relative/path')).ok, false)
   } finally {
     delete process.env.OPENCODE_DB
     await fsp.rm(home, { recursive: true, force: true })
   }
+})
+
+// ── OpenCode via BOT_CROSSING_OPENCODE_DB, plus the dev database ─────────────
+
+async function fakeOpencodeOurs(sessions, withParts = true) {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'opencode-ours-'))
+  const file = path.join(dir, 'opencode.db')
+  const { DatabaseSync } = await import('node:sqlite')
+  const db = new DatabaseSync(file)
+  db.exec(
+    `CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT,
+      directory TEXT NOT NULL, title TEXT NOT NULL, agent TEXT, model TEXT,
+      time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_archived INTEGER)`
+  )
+  const ins = db.prepare(
+    `INSERT INTO session (id, project_id, parent_id, directory, title, agent, model,
+      time_created, time_updated, time_archived) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  )
+  for (const s of sessions) ins.run(...s)
+  if (withParts) {
+    db.exec(
+      `CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL,
+        session_id TEXT NOT NULL, time_created INTEGER NOT NULL,
+        time_updated INTEGER NOT NULL, data TEXT NOT NULL)`
+    )
+    db.prepare(
+      `INSERT INTO part (id, message_id, session_id, time_created, time_updated, data)
+       VALUES ('p1', 'm1', 'ses_main000000000000000001', 1, 1, '{"type":"text","text":"hello there"}')`
+    ).run()
+  }
+  db.close()
+  return file
+}
+
+async function opencodeOursWith(dbFile) {
+  process.env.BOT_CROSSING_OPENCODE_DB = dbFile
+  const mod = await import(`../server/harnesses/opencode.mjs?ours-${path.basename(path.dirname(dbFile))}`)
+  return mod.default
+}
+
+test('opencode parses model JSON, reports archived, and hides subagent children', async () => {
+  const now = Date.now()
+  const dbFile = await fakeOpencodeOurs([
+    ['ses_main000000000000000001', 'proj1', null, '/tmp/demo', 'Do the thing', 'build',
+      '{"id":"anthropic/claude-opus-4-6","providerID":"opencode","variant":"default"}', now - 9000, now - 1000, null],
+    ['ses_kid00000000000000000002', 'proj1', 'ses_main000000000000000001', '/tmp/demo', 'Task child', 'general',
+      '', now - 8000, now - 500, null],
+    ['ses_old00000000000000000003', 'proj1', null, '/tmp/demo', 'Old thread', 'build',
+      '{malformed json', now - 90000, now - 80000, now - 70000],
+  ])
+  try {
+    const h = await opencodeOursWith(dbFile)
+    const threads = await h.scanThreads()
+    const ids = threads.map((t) => t.id)
+    assert.ok(ids.includes('opencode:ses_main000000000000000001'), 'ids are prefixed')
+    assert.ok(!ids.some((id) => id.includes('kid')), 'a task child is not its own astronaut')
+    const main = threads.find((t) => t.id === 'opencode:ses_main000000000000000001')
+    assert.equal(main.model, 'anthropic/claude-opus-4-6', 'model JSON is parsed to its id')
+    assert.equal(main.title, 'Do the thing')
+    assert.equal(main.project, 'demo')
+    assert.deepEqual(main.ref, { sessionId: 'ses_main000000000000000001', cwd: '/tmp/demo' })
+    assert.equal(main.canOpen, true)
+    assert.ok(typeof main.sizeBytes === 'number' && main.sizeBytes > 0, 'part bytes size the building')
+    const old = threads.find((t) => t.id === 'opencode:ses_old00000000000000000003')
+    assert.equal(old.archived, true, 'archived in the harness reads as archived here')
+    assert.equal(old.model, '', 'malformed model JSON degrades to empty, not a throw')
+  } finally {
+    delete process.env.BOT_CROSSING_OPENCODE_DB
+    await fsp.rm(path.dirname(dbFile), { recursive: true, force: true })
+  }
+})
+
+test('opencode scans with only a session table rather than losing every thread', async () => {
+  const now = Date.now()
+  const dbFile = await fakeOpencodeOurs([
+    ['ses_main000000000000000001', 'proj1', null, '/tmp/demo', 'Do the thing', 'build',
+      '{"id":"gpt-5","providerID":"x"}', now - 9000, now - 1000, null],
+  ], false)
+  try {
+    const h = await opencodeOursWith(dbFile)
+    const [t] = await h.scanThreads()
+    assert.equal(t.title, 'Do the thing')
+    assert.equal(t.model, 'gpt-5')
+    assert.equal(t.sizeBytes, 0)
+  } finally {
+    delete process.env.BOT_CROSSING_OPENCODE_DB
+    await fsp.rm(path.dirname(dbFile), { recursive: true, force: true })
+  }
+})
+
+test('opencode reads the stable database before the dev one', () => {
+  const basenames = defaultDbFiles().slice(0, 2).map((f) => path.basename(f))
+  assert.deepEqual(basenames, ['opencode.db', 'opencode-dev.db'])
 })
 
 // ── Antigravity CLI, faked on disk ────────────────────────────────────────────
@@ -896,4 +1001,48 @@ test('kilocode refuses untrusted refs and opens the repo folder in VS Code', asy
     delete process.env.KILO_DB
     await fsp.rm(home, { recursive: true, force: true })
   }
+})
+
+// ── HUD card avatars ────────────────────────────────────────────────────────
+
+test('every registered harness resolves to paint layers, or deliberately falls back to the face', () => {
+  for (const h of HARNESSES) {
+    const layers = harnessMark(h.id)
+    if (layers === undefined) continue // documented in harness-marks.js
+    assert.ok(Array.isArray(layers) && layers.length > 0)
+    for (const { d, fill } of layers) {
+      assert.match(d, /^[Mm]/, `${h.id} mark is not path data`)
+      assert.match(fill, /^#([0-9a-f]{3}|[0-9a-f]{6})$/, `${h.id} mark fill is not a colour`)
+    }
+  }
+  // The four we ship artwork for today.
+  for (const id of ['claude-code', 'codex', 'cursor', 'opencode']) {
+    assert.ok(harnessMark(id), `${id} should have a mark`)
+  }
+  // The two-tone mark really is two tones.
+  assert.deepEqual(
+    harnessMark('opencode').map((l) => l.fill),
+    ['#fff', '#8f959e']
+  )
+})
+
+test('refs from the page cannot smuggle a mark lookup, and unknown harnesses keep the face', () => {
+  assert.equal(harnessMark(['claude-code']), undefined)
+  assert.equal(harnessMark({ toString: () => 'claude-code' }), undefined)
+  assert.equal(harnessMark('definitely-not-a-harness'), undefined)
+  assert.equal(harnessMark(null), undefined)
+  assert.equal(drawHarnessMark(null, 'definitely-not-a-harness', 108), false)
+})
+
+test('brand marks are on by default and stay out of presets', () => {
+  assert.equal(DEFAULTS.harnessMarks, true)
+})
+
+test('the avatar decision honours the toggle and never blanks the card', () => {
+  assert.equal(avatarMode(true, 'claude-code'), 'mark')
+  assert.equal(avatarMode(true, 'opencode'), 'mark')
+  assert.equal(avatarMode(false, 'claude-code'), 'face')
+  assert.equal(avatarMode(true, 'definitely-not-a-harness'), 'face')
+  assert.equal(avatarMode(true, null), 'face')
+  assert.equal(avatarMode(false, null), 'face')
 })

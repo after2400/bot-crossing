@@ -1,16 +1,23 @@
 /**
  * Harness adapter: OpenCode — sessions in a local SQLite database.
  *
- * Primary store is `opencode.db` (WAL mode, so concurrent readers are safe while
- * the app runs): `~/.local/share/opencode/opencode.db`, overridable with
- * `$OPENCODE_DB`. Only top-level sessions count as threads — child rows with
- * `parent_id` set are the task tool's subagents, and OpenCode's own session list
- * filters them the same way. Including them would stand hundreds of astronauts
- * on the map that nobody ever talked to.
+ * Each build keeps its own database: `opencode.db` for stable, `opencode-dev.db`
+ * for the dev build (review builds land beside them as `opencode-review-<port>.db`
+ * and are deliberately not read — ephemeral). Every file present is scanned.
+ * `$OPENCODE_DB` names one file outright; `$BOT_CROSSING_OPENCODE_DB` does the
+ * same for fixture tests.
  *
- * Read-only, without exception, and no subprocess anywhere. There is no
- * per-session deep link upstream, so opening a thread is honestly refused and
- * starting one goes through the registered `opencode://new-session` handler.
+ * One bound on opening: `opencode://` is claimed by every installed build and
+ * the OS routes it to exactly one of them, so a session id only resolves in
+ * the app that wrote it. There is nothing to address a single build with —
+ * the scheme is shared.
+ *
+ * Only top-level sessions count as threads — child rows with `parent_id` set
+ * are the task tool's subagents, and OpenCode's own session list filters them
+ * the same way. Including them would stand hundreds of astronauts on the map
+ * that nobody ever talked to.
+ *
+ * Read-only, without exception, and no subprocess anywhere.
  */
 import path from 'node:path'
 import os from 'node:os'
@@ -18,30 +25,34 @@ import { exists, findExecutable, num } from '../lib/fsutil.mjs'
 
 const HOME = os.homedir()
 
-/**
- * Where `opencode.db` lives. `$OPENCODE_DB` wins when it names a file that is
- * actually there — otherwise the XDG path, then the macOS Application Support
- * fallback on darwin only. Resolved per call so pointing the var at a fixture
- * (or installing the app) is picked up on the next poll.
- */
-async function dbPath() {
-  const override = process.env.OPENCODE_DB
-  // When set, the override is the whole answer: a missing file means "absent",
-  // not "fall back to the default and read a database the user did not name".
-  // That is also what makes fixture tests isolate from the real store.
-  if (typeof override === 'string' && override) return (await exists(override)) ? override : ''
+/** Where this machine keeps OpenCode databases, honouring XDG like the app does. */
+const dataDir = () => {
   const xdg = process.env.XDG_DATA_HOME
-  if (typeof xdg === 'string' && xdg) {
-    const p = path.join(xdg, 'opencode', 'opencode.db')
-    if (await exists(p)) return p
+  if (typeof xdg === 'string' && xdg) return path.join(xdg, 'opencode')
+  return path.join(HOME, '.local', 'share', 'opencode')
+}
+
+/** The stable database first, then the dev build's — every file present is read. */
+export const defaultDbFiles = () => {
+  const files = [path.join(dataDir(), 'opencode.db'), path.join(dataDir(), 'opencode-dev.db')]
+  if (process.platform === 'darwin' && !process.env.XDG_DATA_HOME) {
+    const mac = path.join(HOME, 'Library', 'Application Support', 'opencode')
+    files.push(path.join(mac, 'opencode.db'), path.join(mac, 'opencode-dev.db'))
   }
-  const shared = path.join(HOME, '.local', 'share', 'opencode', 'opencode.db')
-  if (await exists(shared)) return shared
-  if (process.platform === 'darwin') {
-    const mac = path.join(HOME, 'Library', 'Application Support', 'opencode', 'opencode.db')
-    if (await exists(mac)) return mac
-  }
-  return ''
+  return files
+}
+
+/**
+ * Which files to read. `$BOT_CROSSING_OPENCODE_DB` (fixtures) and `$OPENCODE_DB`
+ * each name one file outright: a missing file means "absent", not "fall back to
+ * the default and read a database the user did not name". That is also what
+ * makes fixture tests isolate from the real store.
+ */
+async function dbFiles() {
+  if (process.env.BOT_CROSSING_OPENCODE_DB) return [process.env.BOT_CROSSING_OPENCODE_DB]
+  const override = process.env.OPENCODE_DB
+  if (typeof override === 'string' && override) return (await exists(override)) ? [override] : []
+  return defaultDbFiles()
 }
 
 /**
@@ -57,6 +68,14 @@ const sqliteApi = () => (sqlitePromise ??= import('node:sqlite').catch(() => nul
 
 /** Prefixed, per the contract in `server/harnesses/README.md`. */
 const ID = (raw) => `opencode:${raw}`
+
+/** Session ids look like `ses_f53ca9820ffeU8ASs3LX19bw51`. */
+const SESSION_ID = /^ses_[A-Za-z0-9]+$/
+// The type check matters wherever an id came back from the page: `RegExp.test`
+// stringifies, so a one-element array holding a valid id would pass the pattern
+// and then travel on as an array.
+const isSessionId = (v) => typeof v === 'string' && SESSION_ID.test(v)
+const isAbsDir = (v) => typeof v === 'string' && path.isAbsolute(v)
 
 /** OpenCode writes nothing when it is killed, so an open turn needs a time bound too. */
 const ACTIVE_WINDOW_MS = 30 * 60 * 1000
@@ -152,12 +171,19 @@ async function sessionFacts(db, sessionId, timeUpdated) {
   const hit = factsCache.get(sessionId)
   if (hit && hit.timeUpdated === timeUpdated) return hit.facts
   const facts = { running: false, hasError: false, sizeBytes: 0 }
+  // Counted separately: a store with only one of the two tables still sizes
+  // from the half it has, rather than zeroing both on one throw.
   try {
     const msgBytes = db.prepare(`SELECT COALESCE(SUM(LENGTH(data)), 0) AS n FROM message WHERE session_id = ?`).get(sessionId)
-    const partBytes = db.prepare(`SELECT COALESCE(SUM(LENGTH(data)), 0) AS n FROM part WHERE session_id = ?`).get(sessionId)
-    facts.sizeBytes = num(msgBytes?.n) + num(partBytes?.n)
+    facts.sizeBytes += num(msgBytes?.n)
   } catch {
-    facts.sizeBytes = 0
+    /* no message table — the parts still count */
+  }
+  try {
+    const partBytes = db.prepare(`SELECT COALESCE(SUM(LENGTH(data)), 0) AS n FROM part WHERE session_id = ?`).get(sessionId)
+    facts.sizeBytes += num(partBytes?.n)
+  } catch {
+    facts.sizeBytes += 0
   }
   try {
     const last = db
@@ -204,25 +230,24 @@ async function sessionFacts(db, sessionId, timeUpdated) {
   return facts
 }
 
-async function scanThreads() {
-  const file = await dbPath()
-  if (!file) return []
+async function readDbFile(dbFile) {
   const sqlite = await sqliteApi()
   if (!sqlite?.DatabaseSync) return []
-
   let db
   try {
-    db = new sqlite.DatabaseSync(file, { readOnly: true })
+    db = new sqlite.DatabaseSync(dbFile, { readOnly: true })
   } catch {
     // A WAL database whose shared-memory file cannot be used refuses a
-    // read-only open. Losing one harness beats losing the scan.
+    // read-only open. Losing one database beats losing the scan.
     return []
   }
   try {
     const tables = new Set(
       db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all().map((r) => r.name)
     )
-    if (!tables.has('session') || !tables.has('message') || !tables.has('part')) return []
+    // Only `session` is load-bearing: the message/part reads below degrade to
+    // empty facts when their tables are absent, rather than costing the pass.
+    if (!tables.has('session')) return []
     // Undocumented private state that drifts between versions — probe every
     // column before naming it, or one renamed column costs the whole harness.
     const cols = new Set(db.prepare(`PRAGMA table_info(session)`).all().map((r) => r.name))
@@ -271,7 +296,7 @@ async function scanThreads() {
         // buildings taller than Claude ones for the same work.
         sizeBytes: facts.sizeBytes,
         source: typeof r.agent === 'string' ? r.agent : '',
-        canOpen: false,
+        canOpen: isSessionId(r.id) && isAbsDir(cwd),
         ref: { sessionId: r.id, cwd }
       })
     }
@@ -287,58 +312,65 @@ async function scanThreads() {
   }
 }
 
-/**
- * OpenCode registers `opencode://open-project` and `opencode://new-session`
- * and nothing that addresses a single session — inventing a route would be a
- * link that silently does nothing. Revealing the session list is the honest
- * offer, and the UI greys the button and shows this instead.
- */
-function openThread(ref) {
-  const id = ref?.sessionId
-  // The type check matters wherever an id came back from the page:
-  // `String([validId])` is that id, and it must not travel on as an array.
-  if (typeof id !== 'string' || !id) {
-    return { ok: false, error: 'No openable OpenCode session id on that thread' }
-  }
-  return {
-    ok: false,
-    error: 'OpenCode has no link to a single session — open the repo and pick it from the session list.'
-  }
+async function scanThreads() {
+  const threads = await Promise.all((await dbFiles()).map((f) => readDbFile(f)))
+  return threads.flat()
 }
 
 /**
- * Where the `opencode` CLI is, for a machine that needs the terminal fallback.
- * PATH first, then the places its installers put it — never inside an
- * application bundle. Only Linux asks: on macOS and Windows the deep link is
- * always answered, so the walk is wasted.
+ * Where the `opencode` CLI is. PATH first, then the places its installers put
+ * it — never inside an application bundle.
  */
-const CLI_DIRS = [path.join(HOME, '.local', 'bin'), path.join(HOME, '.opencode', 'bin'), '/usr/local/bin', '/usr/bin']
+const CLI_DIRS = [
+  path.join(HOME, '.opencode', 'bin'),
+  path.join(HOME, '.local', 'bin'),
+  '/usr/local/bin',
+  '/usr/bin',
+]
 const cliBinary = () => findExecutable('opencode', CLI_DIRS)
 
+/**
+ * Opens the exact session in the desktop app. `server=sidecar` addresses the
+ * desktop's own local server; the CLI resume rides along so the terminal
+ * choice (`via=terminal`) and the Linux fallback land on the session too.
+ *
+ * Provisional: no per-session route is documented upstream — if the installed
+ * build ignores the hostname the app fronts with nothing selected, and this
+ * goes back to the honest refusal.
+ */
+async function openThread(ref) {
+  const sessionId = ref?.sessionId
+  const cwd = ref?.cwd
+  if (!isSessionId(sessionId) || !isAbsDir(cwd)) {
+    return { ok: false, error: 'No openable OpenCode session on that thread' }
+  }
+  const url = `opencode://open-session?${new URLSearchParams({ server: 'sidecar', session: sessionId })}`
+  const bin = await cliBinary()
+  const command = bin ? { argv: [bin, '--session', sessionId], cwd } : undefined
+  return { ok: true, url, command }
+}
+
+/** `opencode://new-session?directory=…` is the link the app actually answers. */
 async function newSession(dir) {
-  if (typeof dir !== 'string' || !path.isAbsolute(dir)) {
-    return { ok: false, error: 'That folder is not somewhere OpenCode can open' }
-  }
+  if (!isAbsDir(dir)) return { ok: false, error: 'That folder is not somewhere OpenCode can open' }
   const url = `opencode://new-session?${new URLSearchParams({ directory: dir })}`
-  let command
-  if (process.platform === 'linux') {
-    const bin = await cliBinary()
-    if (bin) command = { argv: [bin], cwd: dir }
-  }
+  const bin = await cliBinary()
+  const command = bin ? { argv: [bin, dir], cwd: dir } : undefined
   return { ok: true, url, command }
 }
 
 async function detect() {
-  return Boolean(await dbPath())
+  return (await Promise.all((await dbFiles()).map((f) => exists(f)))).some(Boolean)
 }
 
 /**
  * Why a present OpenCode might still look thin. Without this the old-Node case
- * is invisible: the database is simply skipped, every thread is missing, and
+ * is invisible: the databases are simply skipped, every thread is missing, and
  * nothing says why.
  */
 async function diagnostic() {
-  if (!(await dbPath())) return ''
+  const found = (await Promise.all((await dbFiles()).map((f) => exists(f)))).some(Boolean)
+  if (!found) return ''
   if (!(await sqliteApi())?.DatabaseSync) {
     return `OpenCode threads need Node 22.13 or newer for their sessions (running ${process.versions.node})`
   }
@@ -353,5 +385,5 @@ export default {
   scanThreads,
   openThread,
   newSession,
-  paths: {}
+  paths: {},
 }
