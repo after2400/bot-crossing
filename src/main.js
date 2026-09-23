@@ -78,6 +78,7 @@ let statusCursor = 0
 /** Sorted `/api/harnesses` answer, fetched on first picker open — see `harnessChoices`. */
 let harnessChoicesCache = null
 let busiestCursor = 0
+let busiestScope = ''
 let pendingSave = 0
 /** The last usage figure the poll saw, so a budget-only settings change can redraw the
  *  readout without waiting on the next poll. */
@@ -192,11 +193,19 @@ const actions = {
    * "Busiest" is a proxy for now — most recently active thread — until real per-agent spend
    * or call counts exist to rank by instead.
    */
-  focusBusiest: () => {
-    const pool = colony.astronauts.agents
+  focusBusiest: ({ crossProject = false } = {}) => {
+    // Same scoping as focusAgent: the open zone by default, the whole colony with shift.
+    const scoped = !crossProject && selectedProject
+    const pool = colony.astronauts.agents.filter((a) => !scoped || a.thread?.project === selectedProject)
     if (!pool.length) {
-      hud.hint('No crew on the surface')
+      hud.hint(scoped ? `Nobody in ${selectedProject} right now` : 'No crew on the surface')
       return
+    }
+    // A different scope is a different ranking, so start it from the top.
+    const scope = scoped || ''
+    if (scope !== busiestScope) {
+      busiestScope = scope
+      busiestCursor = 0
     }
     // Blocked crew come first, then everyone by most recent activity.
     const ranked = [...pool].sort(
@@ -973,7 +982,7 @@ window.addEventListener('keydown', (e) => {
       break
     case 'b':
     case 'B':
-      actions.focusBusiest()
+      actions.focusBusiest({ crossProject: e.shiftKey })
       break
     case 'Tab':
       e.preventDefault()
