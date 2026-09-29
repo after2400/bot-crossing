@@ -306,7 +306,7 @@ under **View → Return to isometric**.
 | `V` | Mark the selected thread viewed, so it stops asking |
 | `C` | New conversation in the open zone's folder |
 | `O` | Orbit mode |
-| `Tab` | Next planet |
+| `Tab` / `⇧Tab` | Next / previous planet |
 | `L` | Next time of day |
 | `M` | Mute |
 | `P` | Screenshot |
