@@ -111,7 +111,7 @@ async function readState() {
 /**
  * Writes are serialised through one chain, and each gets its own temp file.
  *
- * Both halves matter and neither is theoretical. A shared `colony.json.tmp` means two saves
+ * Both halves matter and neither is theoretical. A shared `<state file>.tmp` means two saves
  * landing together race on the rename and one throws ENOENT — a 500 the page has no idea what
  * to do with, so the save is simply lost. And read-then-write is not atomic across an `await`,
  * so without the chain two callers can both pass the version check below before either writes.
@@ -287,7 +287,7 @@ const viaOf = (body) => (body?.via === 'terminal' ? 'terminal' : 'app')
  *
  * So the colony keeps its own list and that is all it does. Archiving in the harness's own UI
  * still sends the astronaut home, because the scan reads that flag; archiving here is the
- * colony's own business. Nothing outside `data/colony.json` is ever written.
+ * colony's own business. Nothing outside the state file is ever written.
  */
 async function reconcileArchived(threads) {
   const state = await readState()
