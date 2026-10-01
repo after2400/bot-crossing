@@ -211,6 +211,36 @@ test('viewedAt survives a merge, so a second tab cannot un-view a thread', () =>
   assert.deepEqual(merged.viewedAt, { a: 5, b: 7 })
 })
 
+test('BOT_CROSSING_STATE names the state file itself', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'bot-crossing-state-'))
+  const prevData = process.env.BOT_CROSSING_DATA
+  const prevState = process.env.BOT_CROSSING_STATE
+  delete process.env.BOT_CROSSING_DATA
+  process.env.BOT_CROSSING_STATE = path.join(dir, 'lorien-colony.json')
+  // Fresh import so STATE_FILE is read with the override in place.
+  const { apiMiddleware } = await import(`../server/api.mjs?state-${Date.now()}`)
+  const server = http.createServer((req, res) => apiMiddleware(req, res, null))
+  await new Promise((r) => server.listen(0, '127.0.0.1', r))
+  const port = server.address().port
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/state`, {
+      method: 'PUT',
+      headers: { Origin: `http://localhost:${port}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ archived: ['mine'] }),
+    })
+    assert.equal(res.status, 200)
+    const raw = JSON.parse(await fsp.readFile(path.join(dir, 'lorien-colony.json'), 'utf8'))
+    assert.deepEqual(raw.archived, ['mine'])
+  } finally {
+    server.close()
+    if (prevData === undefined) delete process.env.BOT_CROSSING_DATA
+    else process.env.BOT_CROSSING_DATA = prevData
+    if (prevState === undefined) delete process.env.BOT_CROSSING_STATE
+    else process.env.BOT_CROSSING_STATE = prevState
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('viewedAt is carried through the v1 migration with the ids it keys on', async () => {
   await withServer(async ({ call, dir }) => {
     const id = 'fe911daa-2393-4e29-8d36-6e37c328594c'
