@@ -345,9 +345,9 @@ async function v2Facts(db, sessionId, timeUpdated, facts) {
           // Only the last turn counts: a historic tool error must not redden
           // an astronaut forever. The tool calls ride inside the assistant
           // row's own `content`, so the recent rows are searched here rather
-          // than in a parts table.
+          // than in a parts table. At most three rows, so each is parsed
+          // outright rather than pre-filtered on its JSON spelling.
           facts.hasError = rows
-            .filter((r) => r.data && r.data.includes('"status":"error"'))
             .map((r) => parse(r))
             .flatMap((d) => (Array.isArray(d.content) ? d.content : []))
             .some((part) => part?.type === 'tool' && part?.state?.status === 'error' && isRealErrorV2(part))
@@ -429,19 +429,18 @@ async function readDbFile(dbFile) {
       // a path test would strand them. Anything else keeps the honest
       // directory basename it always had.
       const root = projectRoots?.get(r.project_id) || null
-      const base = typeof root === 'string' ? root.replace(/[\\/]$/, '') : ''
-      const managed = Boolean(base) && dir.startsWith(dataDir().replace(/[\\/]$/, '') + '/worktree/')
-      const inRoot = Boolean(
-        base &&
-          root.length > 1 &&
-          dir &&
-          (dir === root || dir.startsWith(base + '/') || dir.startsWith(base + path.sep))
-      ) || managed
+      // Trailing separators trimmed on both sides, so `/repo/` and `/repo`
+      // are the same checkout whichever of them OpenCode stored.
+      const base = typeof root === 'string' ? root.replace(/[\\/]+$/, '') : ''
+      const trimmed = dir.replace(/[\\/]+$/, '')
+      const under = (parent) => trimmed.startsWith(parent + '/') || trimmed.startsWith(parent + path.sep)
+      const managed = Boolean(base) && under(path.join(dataDir(), 'worktree'))
+      const inRoot = Boolean(base && trimmed && (trimmed === base || under(base))) || managed
       const name = inRoot ? joinName(root) : null
       const { projectPath, project, cwd } = name
         ? { projectPath: base, project: name, cwd: dir }
         : projectOf(dir)
-      const worktree = name && dir !== root ? path.basename(dir.replace(/\\/g, '/')) : ''
+      const worktree = name && trimmed !== base ? path.basename(trimmed.replace(/\\/g, '/')) : ''
       const { model, effort } = parseModel(r.model)
       const prompt = await firstUserText(db, r.id, v2)
       const title = clean(r.title) || prompt || 'Untitled thread'

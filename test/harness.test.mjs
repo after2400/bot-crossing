@@ -805,6 +805,11 @@ test('a v2 session in an OpenCode-managed worktree reports its base repo as the 
     `INSERT INTO session_v2 (id, project_id, parent_id, directory, title, agent, model, time_created, time_updated, time_archived)
       VALUES ( ?, 'proj0000000000000000000001aa', NULL, ?, ?, 'build', NULL, ?, ?, NULL)`
   ).run('ses_wtop000000000000000000004', managed, 'OpenCode-managed', now - 2000, now)
+  // The base checkout spelled with a trailing slash is still the base checkout.
+  db.prepare(
+    `INSERT INTO session_v2 (id, project_id, parent_id, directory, title, agent, model, time_created, time_updated, time_archived)
+      VALUES ( ?, 'proj0000000000000000000001aa', NULL, ?, ?, 'build', NULL, ?, ?, NULL)`
+  ).run('ses_wtslash0000000000000000005', `${base}/`, 'Trailing slash', now - 1000, now)
   db.close()
   process.env.OPENCODE_DB = file
   try {
@@ -824,6 +829,9 @@ test('a v2 session in an OpenCode-managed worktree reports its base repo as the 
     assert.equal(op.project, 'the-repo', 'an OpenCode-run worktree outside the repo still groups under the base repo')
     assert.equal(op.worktree, 'leafy-branch')
     assert.equal(op.cwd, managed)
+    const slash = threads.get('opencode:ses_wtslash0000000000000000005')
+    assert.equal(slash.project, 'the-repo')
+    assert.equal(slash.worktree, '', 'a trailing slash does not turn the base checkout into a worktree')
   } finally {
     delete process.env.OPENCODE_DB
     delete process.env.XDG_DATA_HOME
